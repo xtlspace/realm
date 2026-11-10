@@ -16,6 +16,10 @@ inputs:
     description: "The glibc version for zigbuild"
     required: false
     default: ""
+  rustflags:
+    description: "Extra rustc flags, e.g. -C target-cpu=x86-64-v3"
+    required: false
+    default: ""
 runs:
   using: "composite"
   steps:
@@ -47,25 +51,13 @@ runs:
             cmd="cargo build"
             ;;
         esac
-        echo "RUSTFLAGS=${{ steps.flags.outputs.rustc }}" >> "$GITHUB_ENV"
+        # keep flags provided by the caller (e.g. -C target-cpu=...)
+        echo "RUSTFLAGS=${RUSTFLAGS} ${{ inputs.rustflags }} ${{ steps.flags.outputs.rustc }}" >> "$GITHUB_ENV"
         echo "RSBUILD=$cmd ${{ steps.flags.outputs.build-std }} \
           --release --target ${{ inputs.target }}$abi" >> "$GITHUB_ENV"
         echo "EXT=${{ contains(inputs.target, 'windows') && '.exe' || '' }}" >> "$GITHUB_ENV"
       shell: bash
 
-    - name: build and copy binary
-      if: | 
-        !contains(inputs.target, 'mips')
-      run: |
-        ${{ env.RSBUILD }}
-        cp target/${{ inputs.target }}/release/realm${{ env.EXT }} ${{ inputs.outdir }}/realm
-      shell: bash
-    - name: build and copy binary (mips)
-      if: contains(inputs.target, 'mips')
-      run: |
-        ${{ env.RSBUILD }} --no-default-features --features default-ring
-        cp target/${{ inputs.target }}/release/realm${{ env.EXT }} ${{ inputs.outdir }}/realm
-      shell: bash
     - name: build and copy binary (slim)
       run: |
         ${{ env.RSBUILD }} --no-default-features --features default-slim

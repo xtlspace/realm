@@ -6,6 +6,7 @@ use std::io::{Result, Error};
 use std::net::SocketAddr;
 
 use hickory_resolver as resolver;
+use resolver::net::runtime::TokioRuntimeProvider as Tokio;
 use resolver::TokioResolver;
 use resolver::system_conf::read_system_conf;
 use resolver::lookup_ip::{LookupIp, LookupIpIter};
@@ -23,6 +24,9 @@ pub mod config {
     use super::resolver;
     pub use resolver::config::*;
 }
+
+/// Dns resolver.
+pub type Resolver = TokioResolver;
 
 /// Dns config.
 #[derive(Debug, Clone)]
@@ -47,15 +51,40 @@ impl Default for DnsConf {
 
 static mut DNS_CONF: OnceCell<DnsConf> = OnceCell::new();
 
-static mut DNS: Lazy<TokioResolver> = Lazy::new(|| {
-    use resolver::net::runtime::TokioRuntimeProvider as Tokio;
-
-    let DnsConf { conf, opts } = unsafe { DNS_CONF.take().unwrap() };
+fn build_resolver_with(conf: ResolverConfig, opts: ResolverOpts) -> Result<Resolver> {
     TokioResolver::builder_with_config(conf, Tokio::default())
         .with_options(opts)
         .build()
-        .unwrap()
+        .map_err(Error::other)
+}
+
+static mut DNS: Lazy<Resolver> = Lazy::new(|| {
+    let DnsConf { conf, opts } = global_conf();
+    build_resolver_with(conf, opts).expect("failed to build global dns resolver")
 });
+
+/// Get a copy of the global dns config.
+pub fn global_conf() -> DnsConf {
+    unsafe { DNS_CONF.get().cloned() }.unwrap_or_default()
+}
+
+/// Build a dns resolver from the global config, with optional overrides.
+pub fn build_resolver(conf: Option<ResolverConfig>, opts: Option<ResolverOpts>) -> Result<Resolver> {
+    let DnsConf {
+        conf: mut base_conf,
+        opts: mut base_opts,
+    } = global_conf();
+
+    if let Some(conf) = conf {
+        base_conf = conf;
+    }
+
+    if let Some(opts) = opts {
+        base_opts = opts;
+    }
+
+    build_resolver_with(base_conf, base_opts)
+}
 
 /// Force initialization.
 pub fn force_init() {
@@ -91,16 +120,30 @@ pub fn build_lazy(conf: Option<ResolverConfig>, opts: Option<ResolverOpts>) {
 
 /// Lookup ip with global dns resolver.
 pub async fn resolve_ip(ip: &str) -> Result<LookupIp> {
-    unsafe { DNS.lookup_ip(ip).await.map_or_else(|e| Err(Error::other(e)), Ok) }
+    resolve_ip_with(ip, None).await
+}
+
+/// Lookup ip with the given dns resolver, or the global one.
+pub async fn resolve_ip_with(ip: &str, dns: Option<&Resolver>) -> Result<LookupIp> {
+    let lookup = match dns {
+        Some(dns) => dns.lookup_ip(ip).await,
+        None => unsafe { DNS.lookup_ip(ip).await },
+    };
+    lookup.map_err(Error::other)
 }
 
 /// Lookup socketaddr with global dns resolver.
 pub async fn resolve_addr(addr: &RemoteAddr) -> Result<LookupRemoteAddr<'_>> {
+    resolve_addr_with(addr, None).await
+}
+
+/// Lookup socketaddr with the given dns resolver, or the global one.
+pub async fn resolve_addr_with<'a>(addr: &'a RemoteAddr, dns: Option<&Resolver>) -> Result<LookupRemoteAddr<'a>> {
     use RemoteAddr::*;
     use LookupRemoteAddr::*;
     match addr {
         SocketAddr(addr) => Ok(NoLookup(addr)),
-        DomainName(ip, port) => resolve_ip(ip).await.map(|ip| Dolookup(ip, *port)),
+        DomainName(ip, port) => resolve_ip_with(ip, dns).await.map(|ip| Dolookup(ip, *port)),
     }
 }
 

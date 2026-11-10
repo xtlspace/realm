@@ -1,7 +1,10 @@
 use std::fmt::{Formatter, Display};
 use std::net::ToSocketAddrs;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 use serde::{Serialize, Deserialize};
+use realm_core::dns::{self, Resolver};
 use realm_core::dns::config;
 use config::{LookupIpStrategy, NameServerConfig, ConnectionConfig, ProtocolConfig};
 use config::{ResolverConfig, ResolverOpts};
@@ -134,6 +137,36 @@ pub struct DnsConf {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nameservers: Option<Vec<String>>,
+}
+
+static RESOLVERS: OnceLock<Mutex<HashMap<String, Resolver>>> = OnceLock::new();
+
+impl DnsConf {
+    /// Build a dns resolver for this config, or return `None` if no option is set
+    /// (in which case the global resolver is used).
+    ///
+    /// Resolvers with identical configs are shared, so endpoints inheriting the
+    /// same dns options reuse a single resolver (and its cache).
+    pub fn build_resolver(self) -> Option<Resolver> {
+        if self.is_empty() {
+            return None;
+        }
+
+        let key = toml::to_string(&self).expect("failed to serialize dns config");
+        let resolvers = RESOLVERS.get_or_init(|| Mutex::new(HashMap::new()));
+
+        let mut resolvers = resolvers.lock().expect("dns resolver cache poisoned");
+        if let Some(resolver) = resolvers.get(&key) {
+            return Some(resolver.clone());
+        }
+
+        let (conf, opts) = self.build();
+        let resolver =
+            dns::build_resolver(conf, opts).unwrap_or_else(|e| panic!("failed to build dns resolver: {}", e));
+
+        resolvers.insert(key, resolver.clone());
+        Some(resolver)
+    }
 }
 
 impl Display for DnsConf {
@@ -334,6 +367,6 @@ impl Config for DnsConf {
     }
 
     fn is_empty(&self) -> bool {
-        crate::empty![self => mode, min_ttl, max_ttl, cache_size]
+        crate::empty![self => mode, min_ttl, max_ttl, cache_size, protocol, nameservers]
     }
 }

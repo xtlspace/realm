@@ -395,6 +395,28 @@ See [Kaminari Options](https://github.com/zephyrchien/kaminari#options).
 
 The same as [network](#network), override global options.
 
+#### endpoint.dns
+
+The same as [dns](#dns), override global options for this endpoint only.
+
+Useful when different remotes need different resolve strategies, e.g. force one
+endpoint to use A records and another to use AAAA records:
+
+```toml
+[[endpoints]]
+listen = "[::]:1023"
+remote = "example.com:443"
+dns = { mode = "ipv4_only" }
+
+[[endpoints]]
+listen = "[::]:1024"
+remote = "example.com:443"
+dns = { mode = "ipv6_only" }
+```
+
+Endpoints with identical dns options share one resolver (and its cache).
+It only affects remotes given as domain names; ip literals are used as-is.
+
 ### log
 
 #### log.level: string

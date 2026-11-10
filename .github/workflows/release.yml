@@ -20,6 +20,9 @@ jobs:
         target:
           - x86_64-unknown-linux-gnu   # glibc
           - x86_64-unknown-linux-musl  # musl
+        cpu:
+          - x86-64-v2
+          - x86-64-v3
     steps:
       - uses: actions/checkout@v6
       - run: mkdir -p out/${{ matrix.target }}
@@ -29,17 +32,16 @@ jobs:
           mode: cross
           target: ${{ matrix.target }}
           outdir: out/${{ matrix.target }}
-      - name: rename binaries
+          rustflags: "-C target-cpu=${{ matrix.cpu }}"
+      - name: rename binary
         run: |
-          mv out/${{ matrix.target }}/realm      out/${{ matrix.target }}/realm-${{ matrix.target }}
-          mv out/${{ matrix.target }}/realm-slim out/${{ matrix.target }}/realm-slim-${{ matrix.target }}
+          mv out/${{ matrix.target }}/realm-slim \
+             out/${{ matrix.target }}/realm-slim-${{ matrix.target }}-${{ matrix.cpu }}
       - name: upload artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: binaries-${{ matrix.target }}
-          path: |
-            out/${{ matrix.target }}/realm-${{ matrix.target }}
-            out/${{ matrix.target }}/realm-slim-${{ matrix.target }}
+          name: binaries-${{ matrix.target }}-${{ matrix.cpu }}
+          path: out/${{ matrix.target }}/realm-slim-${{ matrix.target }}-${{ matrix.cpu }}
           if-no-files-found: error
 
   publish:

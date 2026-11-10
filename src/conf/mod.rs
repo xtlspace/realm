@@ -160,6 +160,7 @@ impl FullConf {
         self.dns.rst_field(dns);
         self.endpoints.iter_mut().for_each(|x| {
             x.network.rst_field(network);
+            x.dns.rst_field(dns);
         });
 
         self
@@ -169,6 +170,7 @@ impl FullConf {
     pub fn apply_global_opts(&mut self) -> &mut Self {
         self.endpoints.iter_mut().for_each(|x| {
             x.network.take_field(&self.network);
+            x.dns.take_field(&self.dns);
         });
 
         self

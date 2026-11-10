@@ -111,6 +111,7 @@ impl Config for NetConf {
             // from endpoint
             bind_address: None,
             bind_interface: None,
+            resolver: None,
 
             #[cfg(feature = "balance")]
             balancer: Default::default(),

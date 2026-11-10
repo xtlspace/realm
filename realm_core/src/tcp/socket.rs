@@ -5,7 +5,7 @@ use std::time::Duration;
 use realm_syscall::socket2::Socket;
 use tokio::net::{TcpSocket, TcpStream, TcpListener};
 
-use crate::dns::resolve_addr;
+use crate::dns::resolve_addr_with;
 use crate::time::timeoutfut;
 use crate::endpoint::{RemoteAddr, BindOpts, ConnectOpts};
 
@@ -68,7 +68,7 @@ pub async fn connect(raddr: &RemoteAddr, conn_opts: &ConnectOpts) -> Result<TcpS
     let mut last_err = None;
     let keepalive = keepalive::build(conn_opts);
 
-    for addr in resolve_addr(raddr).await?.iter() {
+    for addr in resolve_addr_with(raddr, conn_opts.resolver.as_ref()).await?.iter() {
         log::debug!("[tcp]{} resolved as {}", raddr, addr);
 
         let socket = new_socket(&addr, *send_mptcp)?;

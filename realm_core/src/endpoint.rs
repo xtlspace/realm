@@ -9,6 +9,9 @@ use kaminari::mix::{MixAccept, MixConnect};
 #[cfg(feature = "balance")]
 use realm_lb::Balancer;
 
+use crate::dns::Resolver;
+use crate::dns::config::LookupIpStrategy;
+
 /// Remote address.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteAddr {
@@ -43,6 +46,9 @@ pub struct ConnectOpts {
     pub tcp_keepalive_probe: usize,
     pub bind_address: Option<SocketAddr>,
     pub bind_interface: Option<String>,
+
+    /// Dns resolver for remote addresses, fallback to the global one if none.
+    pub resolver: Option<Resolver>,
 
     #[cfg(feature = "proxy")]
     pub proxy_opts: ProxyOpts,
@@ -119,6 +125,7 @@ impl Display for ConnectOpts {
             tcp_keepalive_probe,
             bind_address,
             bind_interface,
+            resolver,
 
             #[cfg(feature = "proxy")]
             proxy_opts,
@@ -139,6 +146,18 @@ impl Display for ConnectOpts {
         }
 
         write!(f, "send-mptcp={}; ", send_mptcp)?;
+
+        if let Some(resolver) = resolver {
+            let mode = match resolver.options().ip_strategy {
+                LookupIpStrategy::Ipv4Only => "ipv4_only",
+                LookupIpStrategy::Ipv6Only => "ipv6_only",
+                LookupIpStrategy::Ipv4AndIpv6 => "ipv4_and_ipv6",
+                LookupIpStrategy::Ipv6AndIpv4 => "ipv6_and_ipv4",
+                LookupIpStrategy::Ipv4thenIpv6 => "ipv4_then_ipv6",
+                LookupIpStrategy::Ipv6thenIpv4 => "ipv6_then_ipv4",
+            };
+            write!(f, "dns-mode={}, ", mode)?;
+        }
 
         #[cfg(feature = "proxy")]
         {

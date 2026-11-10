@@ -9,7 +9,7 @@ use realm_core::balance::Balancer;
 #[cfg(feature = "transport")]
 use realm_core::kaminari::mix::{MixAccept, MixConnect};
 
-use super::{Config, NetConf, NetInfo};
+use super::{Config, NetConf, NetInfo, DnsConf};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EndpointConf {
@@ -48,6 +48,10 @@ pub struct EndpointConf {
     #[serde(default)]
     #[serde(skip_serializing_if = "Config::is_empty")]
     pub network: NetConf,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Config::is_empty")]
+    pub dns: DnsConf,
 }
 
 impl EndpointConf {
@@ -181,6 +185,9 @@ impl Config for EndpointConf {
         conn_opts.bind_interface = self.interface;
         bind_opts.bind_interface = self.listen_interface;
 
+        // per-endpoint dns resolver
+        conn_opts.resolver = self.dns.build_resolver();
+
         EndpointInfo {
             no_tcp,
             use_udp,
@@ -220,6 +227,7 @@ impl Config for EndpointConf {
             listen_transport,
             remote_transport,
             network: Default::default(),
+            dns: Default::default(),
             extra_remotes: Vec::new(),
             balance: None,
         }

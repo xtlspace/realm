@@ -41,3 +41,4 @@ balance = "roundrobin: 2, 1"
 through = "0.0.0.0"
 interface = "wlan0"
 listen_interface = "lo"
+dns = { mode = "ipv6_only" }
