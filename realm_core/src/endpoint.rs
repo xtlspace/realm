@@ -22,7 +22,6 @@ pub enum RemoteAddr {
 pub struct ProxyOpts {
     pub send_proxy: bool,
     pub accept_proxy: bool,
-    pub send_proxy_version: usize,
     pub accept_proxy_timeout: usize,
 }
 
@@ -146,13 +145,12 @@ impl Display for ConnectOpts {
             let ProxyOpts {
                 send_proxy,
                 accept_proxy,
-                send_proxy_version,
                 accept_proxy_timeout,
             } = proxy_opts;
             write!(
                 f,
-                "send-proxy={0}, send-proxy-version={2}, accept-proxy={1}, accept-proxy-timeout={3}s; ",
-                send_proxy, accept_proxy, send_proxy_version, accept_proxy_timeout
+                "send-proxy={0}, accept-proxy={1}, accept-proxy-timeout={2}s; ",
+                send_proxy, accept_proxy, accept_proxy_timeout
             )?;
         }
 

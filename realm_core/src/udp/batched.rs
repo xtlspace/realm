@@ -80,9 +80,14 @@ impl Packet {
 
 #[cfg(not(all(target_os = "linux", feature = "batched-udp")))]
 pub use common::{recv_some, send_all};
+#[cfg(all(not(all(target_os = "linux", feature = "batched-udp")), feature = "proxy"))]
+pub use common::send_all_with_header;
 #[cfg(not(all(target_os = "linux", feature = "batched-udp")))]
 mod common {
     use super::*;
+    #[cfg(feature = "proxy")]
+    use crate::udp::proxy::PROXY_V2_MAX_LEN;
+
     pub async fn recv_some(sock: &UdpSocket, pkts: &mut [Packet]) -> Result<usize> {
         debug_assert!(!pkts.is_empty());
         let pkt = &mut pkts[0];
@@ -101,10 +106,28 @@ mod common {
         }
         Ok(())
     }
+
+    #[cfg(feature = "proxy")]
+    pub async fn send_all_with_header<'a, 'b, 'h, I>(sock: &UdpSocket, pkts: I, header: &'h [u8]) -> Result<()>
+    where
+        I: ExactSizeIterator<Item = PacketRef<'a, 'b>>,
+    {
+        let mut buf = [0u8; PACKET_SIZE + PROXY_V2_MAX_LEN];
+
+        for pkt in pkts {
+            let n = header.len() + pkt.buf.len();
+            buf[..header.len()].copy_from_slice(header);
+            buf[header.len()..n].copy_from_slice(pkt.buf);
+            sock.send_to(&buf[..n], &pkt.addr.inner).await?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(all(target_os = "linux", feature = "batched-udp"))]
 pub use linux::{recv_some, send_all};
+#[cfg(all(target_os = "linux", feature = "batched-udp", feature = "proxy"))]
+pub use linux::send_all_with_header;
 #[cfg(all(target_os = "linux", feature = "batched-udp"))]
 mod linux {
     use super::*;
@@ -162,6 +185,42 @@ mod linux {
             *msg = MmsgHdr::new()
                 .with_addr(&pkt.addr.inner)
                 .with_iovec(std::slice::from_ref(iov))
+        }
+
+        let mut cursor = 0;
+        while cursor < pkt_amt {
+            let n = send_mul_pkts(sock, &mut msgs[cursor..pkt_amt]).await?;
+            cursor += n;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "proxy")]
+    pub async fn send_all_with_header<'a, 'b, 'h, I>(sock: &UdpSocket, pkts: I, header: &'h [u8]) -> Result<()>
+    where
+        I: ExactSizeIterator<Item = PacketRef<'a, 'b>>,
+    {
+        const MAX_PKTS: usize = MAX_PACKETS;
+        debug_assert!(pkts.len() <= MAX_PKTS);
+
+        let pkt_amt = pkts.len();
+        let mut iovs: MaybeUninit<[IoSlice; MAX_PKTS * 2]> = MaybeUninit::uninit();
+        let mut refs: MaybeUninit<[PacketRef<'a, 'b>; MAX_PKTS]> = MaybeUninit::uninit();
+        let mut msgs: MaybeUninit<[MmsgHdr; MAX_PKTS]> = MaybeUninit::uninit();
+        let iovs = unsafe { iovs.assume_init_mut() };
+        let refs = unsafe { refs.assume_init_mut() };
+        let msgs = unsafe { msgs.assume_init_mut() };
+
+        for (i, pkt) in pkts.enumerate() {
+            iovs[2 * i] = IoSlice::new(header);
+            iovs[2 * i + 1] = IoSlice::new(pkt.buf);
+            refs[i] = pkt;
+        }
+        for i in 0..pkt_amt {
+            let pkt = refs[i];
+            msgs[i] = MmsgHdr::new()
+                .with_addr(&pkt.addr.inner)
+                .with_iovec(&iovs[2 * i..2 * i + 2]);
         }
 
         let mut cursor = 0;

@@ -197,20 +197,15 @@ pub fn add_global_options(app: Command) -> Command {
             .long("send-proxy")
             .help("send proxy protocol header")
             .display_order(0),
-        Arg::new("send_proxy_version")
-            .long("send-proxy-version")
-            .help("send proxy protocol version")
-            .value_name("version")
-            .display_order(1),
         Arg::new("accept_proxy")
             .long("accept-proxy")
             .help("accept proxy protocol header")
-            .display_order(2),
+            .display_order(1),
         Arg::new("accept_proxy_timeout")
             .long("accept-proxy-timeout")
             .help("accept proxy protocol timeout")
             .value_name("second")
-            .display_order(3),
+            .display_order(2),
     ]);
 
     // timeout belogs to network

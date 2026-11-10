@@ -23,7 +23,6 @@
     "send_mptcp": false,
     "accept_mptcp": false,
     "send_proxy": true,
-    "send_proxy_version": 2,
     "accept_proxy": true,
     "accept_proxy_timeout": 5,
     "tcp_keepalive": 15,

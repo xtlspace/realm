@@ -25,7 +25,6 @@ async fn proxy_v2() {
         conn_opts: ConnectOpts {
             proxy_opts: ProxyOpts {
                 send_proxy: true,
-                send_proxy_version: 2,
                 ..Default::default()
             },
             ..Default::default()

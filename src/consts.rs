@@ -9,10 +9,7 @@ pub const TCP_KEEPALIVE: usize = 15;
 pub const TCP_KEEPALIVE_PROBE: usize = 3;
 pub const UDP_TIMEOUT: usize = 30;
 
-// default haproxy proxy-protocol version
-pub const PROXY_PROTOCOL_VERSION: usize = 2;
-
-// default haproxy proxy-protocol version
+// default haproxy proxy-protocol timeout
 pub const PROXY_PROTOCOL_TIMEOUT: usize = 5;
 
 // features

@@ -114,6 +114,11 @@ pub async fn associate_and_relay(
 ) -> Result<()> {
     let mut registry = Registry::new(batched::MAX_PACKETS);
 
+    #[cfg(feature = "proxy")]
+    let udp_send_proxy = conn_opts.proxy_opts.send_proxy;
+    #[cfg(feature = "proxy")]
+    let local_addr = lis.local_addr()?;
+
     loop {
         registry.batched_recv_on(&lis).await?;
         log::debug!("[udp]entry batched recvfrom[{}]", registry.count());
@@ -130,6 +135,19 @@ pub async fn associate_and_relay(
                 Result::Ok(s)
             })?;
             let raddr: SockAddrStore = raddr.into();
+
+            #[cfg(feature = "proxy")]
+            if udp_send_proxy {
+                let dst = if local_addr.ip().is_unspecified() {
+                    laddr
+                } else {
+                    local_addr
+                };
+                let (h, n) = super::proxy::build_udp_v2_header(laddr, dst);
+                batched::send_all_with_header(&rsock, pkts.iter().map(|x| x.ref_with_addr(&raddr)), &h[..n]).await?;
+                continue;
+            }
+
             batched::send_all(&rsock, pkts.iter().map(|x| x.ref_with_addr(&raddr))).await?;
         }
     }

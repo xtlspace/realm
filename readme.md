@@ -162,7 +162,6 @@ DNS OPTIONS:
 
 PROXY OPTIONS:
       --send-proxy <send_proxy>        send proxy protocol header
-      --send-proxy-version <version>   send proxy protocol version
       --accept-proxy <accept_proxy>    accept proxy protocol header
       --accept-proxy-timeout <second>  accept proxy protocol timeout
 
@@ -290,7 +289,6 @@ remote = "www.google.com:443"
 │   ├── send_mptcp
 │   ├── accept_mptcp
 │   ├── send_proxy
-│   ├── send_proxy_version
 │   ├── accept_proxy
 │   └── accept_proxy_timeout
 └── endpoints
@@ -583,24 +581,11 @@ default: false
 
 Require `proxy` feature.
 
-Send haproxy PROXY header once the connection established. Both `v1` and `v2` are supported, see [send_proxy_version](#networksend_proxy_version-unsigned-int).
+Send haproxy PROXY protocol v2 header. For TCP it is sent once after the connection is established; for UDP it is prepended to every datagram.
 
 You should make sure the remote peer also speaks proxy-protocol.
 
 default: false
-
-#### network.send_proxy_version: unsigned int
-
-Require `proxy` feature.
-
-This option has no effect unless [send_proxy](#networksend_proxy-bool) is enabled.
-
-value:
-
-- 1
-- 2
-
-default: 2
 
 #### network.accept_proxy: bool
 
@@ -608,7 +593,7 @@ Require `proxy` feature.
 
 Wait for a PROXY header once the connection established.
 
-If the remote sender does not send a `v1` or `v2` header before other contents, the connection will be closed.
+If the remote sender does not send a PROXY protocol v2 header before other contents, the connection will be closed. v1 is not supported.
 
 default: false
 

@@ -5,6 +5,9 @@ mod sockmap;
 mod middle;
 mod batched;
 
+#[cfg(feature = "proxy")]
+mod proxy;
+
 use std::io::Result;
 
 use crate::trick::Ref;
