@@ -15,10 +15,11 @@ mod transport;
 
 use std::io::{ErrorKind, Result};
 
+use crate::sni;
 use crate::trick::Ref;
 use crate::endpoint::Endpoint;
 
-use middle::connect_and_relay;
+use middle::{connect_and_relay, connect_and_relay_with_prefix};
 
 /// Launch a tcp relay.
 pub async fn run_tcp(endpoint: Endpoint) -> Result<()> {
@@ -28,11 +29,13 @@ pub async fn run_tcp(endpoint: Endpoint) -> Result<()> {
         bind_opts,
         conn_opts,
         extra_raddrs,
+        sni,
     } = endpoint;
 
     let raddr = Ref::new(&raddr);
     let conn_opts = Ref::new(&conn_opts);
     let extra_raddrs = Ref::new(&extra_raddrs);
+    let sni = Ref::new(&sni);
 
     let lis = socket::bind(&laddr, bind_opts).unwrap_or_else(|e| panic!("[tcp]failed to bind {}: {}", laddr, e));
     let keepalive = socket::keepalive::build(&conn_opts);
@@ -59,9 +62,49 @@ pub async fn run_tcp(endpoint: Endpoint) -> Result<()> {
         }
 
         tokio::spawn(async move {
-            match connect_and_relay(local, raddr, conn_opts, extra_raddrs).await {
-                Ok(..) => log::debug!("[tcp]{} => {}, finish", addr, raddr.as_ref()),
-                Err(e) => log::error!("[tcp]{} => {}, error: {}", addr, raddr.as_ref(), e),
+            let Some(routes) = sni.as_ref() else {
+                return match connect_and_relay(local, raddr, conn_opts, extra_raddrs).await {
+                    Ok(..) => log::debug!("[tcp]{} => {}, finish", addr, raddr.as_ref()),
+                    Err(e) => log::error!("[tcp]{} => {}, error: {}", addr, raddr.as_ref(), e),
+                };
+            };
+
+            // sniff tls client hello, then select the route by server name
+            let mut local = local;
+            let sniffed = match sni::sniff(&mut local, routes.timeout).await {
+                Ok(x) => x,
+                Err(e) => return log::warn!("[tcp]{} failed to sniff client hello: {}", addr, e),
+            };
+
+            let route = sniffed.server_name.as_deref().and_then(|name| routes.find(name));
+            let (target, resolver) = match route {
+                Some(route) => {
+                    log::debug!("[tcp]{} sni {:?} => {}", addr, sniffed.server_name, route.raddr);
+                    (&route.raddr, route.resolver.as_ref())
+                }
+                None => {
+                    log::debug!(
+                        "[tcp]{} sni {:?} => default {}",
+                        addr,
+                        sniffed.server_name,
+                        raddr.as_ref()
+                    );
+                    (raddr.as_ref(), None)
+                }
+            };
+
+            // route-specific dns resolver
+            let opts = resolver.map(|resolver| {
+                let mut opts = conn_opts.as_ref().clone();
+                opts.resolver = Some(resolver.clone());
+                opts
+            });
+            let opts = opts.as_ref().map(Ref::new).unwrap_or(conn_opts);
+
+            match connect_and_relay_with_prefix(local, Ref::new(target), opts, extra_raddrs, Some(sniffed.prefix)).await
+            {
+                Ok(..) => log::debug!("[tcp]{} => {}, finish", addr, target),
+                Err(e) => log::error!("[tcp]{} => {}, error: {}", addr, target, e),
             }
         });
     }

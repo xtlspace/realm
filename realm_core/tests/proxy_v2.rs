@@ -31,6 +31,7 @@ async fn proxy_v2() {
         },
         bind_opts: Default::default(),
         extra_raddrs: Vec::new(),
+        sni: None,
     };
 
     let endpoint2 = Endpoint {
@@ -49,6 +50,7 @@ async fn proxy_v2() {
         },
         bind_opts: Default::default(),
         extra_raddrs: Vec::new(),
+        sni: None,
     };
 
     tokio::spawn(run_tcp(endpoint1));

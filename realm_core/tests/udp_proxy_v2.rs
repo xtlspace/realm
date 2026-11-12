@@ -32,6 +32,7 @@ async fn udp_proxy_v2() {
         },
         bind_opts: Default::default(),
         extra_raddrs: Vec::new(),
+        sni: None,
     };
 
     tokio::spawn(run_udp(endpoint));

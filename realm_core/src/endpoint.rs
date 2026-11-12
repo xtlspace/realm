@@ -11,6 +11,7 @@ use realm_lb::Balancer;
 
 use crate::dns::Resolver;
 use crate::dns::config::LookupIpStrategy;
+use crate::sni::SniRoutes;
 
 /// Remote address.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +76,8 @@ pub struct Endpoint {
     pub bind_opts: BindOpts,
     pub conn_opts: ConnectOpts,
     pub extra_raddrs: Vec<RemoteAddr>,
+    /// Sni-based routes, sniff client hello before connecting.
+    pub sni: Option<SniRoutes>,
 }
 
 // display impl below
@@ -95,7 +98,11 @@ impl Display for Endpoint {
         for raddr in self.extra_raddrs.iter() {
             write!(f, "|{}", raddr)?;
         }
-        write!(f, "]; options: {}; {}", self.bind_opts, self.conn_opts)
+        write!(f, "]; ")?;
+        if let Some(sni) = &self.sni {
+            write!(f, "sni-routes={}, sni-timeout={}s; ", sni.routes.len(), sni.timeout)?;
+        }
+        write!(f, "options: {}; {}", self.bind_opts, self.conn_opts)
     }
 }
 

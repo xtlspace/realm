@@ -17,10 +17,21 @@ use crate::trick::Ref;
 use crate::endpoint::{RemoteAddr, ConnectOpts};
 #[allow(unused)]
 pub async fn connect_and_relay(
+    local: TcpStream,
+    raddr: Ref<RemoteAddr>,
+    conn_opts: Ref<ConnectOpts>,
+    extra_raddrs: Ref<Vec<RemoteAddr>>,
+) -> Result<()> {
+    connect_and_relay_with_prefix(local, raddr, conn_opts, extra_raddrs, None).await
+}
+
+#[allow(unused)]
+pub async fn connect_and_relay_with_prefix(
     mut local: TcpStream,
     raddr: Ref<RemoteAddr>,
     conn_opts: Ref<ConnectOpts>,
     extra_raddrs: Ref<Vec<RemoteAddr>>,
+    prefix: Option<Vec<u8>>,
 ) -> Result<()> {
     let ConnectOpts {
         #[cfg(feature = "proxy")]
@@ -89,14 +100,20 @@ pub async fn connect_and_relay(
         #[cfg(feature = "transport")]
         {
             if let Some((ac, cc)) = transport {
+                if prefix.is_some() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "[tcp]ssl_preread does not support transport",
+                    ));
+                }
                 transport::run_relay(local, remote, ac, cc).await
             } else {
-                plain::run_relay(local, remote).await
+                plain::run_relay(local, remote, prefix).await
             }
         }
         #[cfg(not(feature = "transport"))]
         {
-            plain::run_relay(local, remote).await
+            plain::run_relay(local, remote, prefix).await
         }
     };
 

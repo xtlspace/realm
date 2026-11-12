@@ -76,6 +76,11 @@ impl Packet {
             addr,
         }
     }
+
+    #[inline]
+    pub fn data(&self) -> &[u8] {
+        &self.buf[..self.cursor as usize]
+    }
 }
 
 #[cfg(not(all(target_os = "linux", feature = "batched-udp")))]

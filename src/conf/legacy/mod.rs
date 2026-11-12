@@ -77,6 +77,8 @@ impl From<LegacyConf> for FullConf {
                 remote_transport: None,
                 network: Default::default(),
                 dns: Default::default(),
+                sni: None,
+                sni_timeout: None,
                 extra_remotes: Vec::new(),
                 balance: None,
             })

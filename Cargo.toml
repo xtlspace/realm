@@ -61,9 +61,9 @@ tokio = { version = "1", features = ["macros"] }
 
 
 [features]
-default = ["proxy", "balance", "multi-thread", "transport", "transport-tls-awslc", "batched-udp", "brutal-shutdown"]
-default-ring = ["proxy", "balance", "multi-thread", "transport", "transport-tls-ring", "batched-udp", "brutal-shutdown"]
-default-slim = ["proxy", "mi-malloc", "multi-thread", "batched-udp", "brutal-shutdown"]
+default = ["proxy", "balance", "multi-thread", "transport", "transport-tls-awslc", "batched-udp", "brutal-shutdown", "quic-sni"]
+default-ring = ["proxy", "balance", "multi-thread", "transport", "transport-tls-ring", "batched-udp", "brutal-shutdown", "quic-sni"]
+default-slim = ["proxy", "mi-malloc", "multi-thread", "batched-udp", "brutal-shutdown", "quic-sni"]
 
 hook = ["realm_core/hook"]
 proxy = ["realm_core/proxy"]
@@ -74,6 +74,7 @@ transport-tls-ring = ["realm_core/transport-tls-ring"]
 transport-tls-awslc = ["realm_core/transport-tls-awslc"]
 batched-udp = ["realm_core/batched-udp"]
 multi-thread = ["tokio/rt-multi-thread", "realm_core/multi-thread"]
+quic-sni = ["realm_core/quic-sni"]
 jemalloc = ["jemallocator"]
 mi-malloc = ["mimalloc"]
 page-alloc = ["mmap-allocator"]

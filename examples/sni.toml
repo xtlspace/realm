@@ -1,0 +1,13 @@
+[log]
+level = "warn"
+
+[[endpoints]]
+listen = "0.0.0.0:443"
+remote = "127.0.0.1:8443"
+
+[endpoints.network]
+use_udp = true
+
+[endpoints.sni]
+"example.com" = "1.1.1.1:443"
+"www.example.com" = { remote = "origin.example.com:443", dns = { mode = "ipv4_only" } }

@@ -417,6 +417,52 @@ dns = { mode = "ipv6_only" }
 Endpoints with identical dns options share one resolver (and its cache).
 It only affects remotes given as domain names; ip literals are used as-is.
 
+#### endpoint.sni
+
+Sniff the tls client hello and route by server name, without terminating tls.
+
+`remote` is the default route, used when the client hello has no server name or
+no route matched.
+
+```toml
+[[endpoints]]
+listen = "0.0.0.0:443"
+remote = "127.0.0.1:8443" # default
+
+[endpoints.sni]
+"example.com" = "1.1.1.1:443"
+"www.example.com" = { remote = "origin.example.com:443", dns = { mode = "ipv4_only" } }
+```
+
+QUIC (udp) is supported as well: enable udp on the endpoint and the initial
+packets are decrypted to read the server name.
+
+```toml
+[[endpoints]]
+listen = "0.0.0.0:443"
+remote = "127.0.0.1:8443"
+
+[endpoints.network]
+use_udp = true
+
+[endpoints.sni]
+"example.com" = "1.1.1.1:443"
+```
+
+Notes:
+
+- works for tcp (tls client hello) and udp (quic initial, v1/v2 only).
+  Cannot be combined with `extra_remotes`, `listen_transport` or
+  `remote_transport`.
+- udp devices are buffered until the server name is known (limited amount and
+  time), packets are then replayed to the selected route. encrypted client
+  hello (ECH) and unsupported quic versions fall back to the default route.
+- server name matching is case-insensitive, `*.example.com` is supported.
+- a route may carry its own [dns](#dns) options, unset fields inherit the
+  endpoint dns (and therefore the global one).
+- `sni_timeout` (seconds, default 5) limits how long to wait for the client
+  hello. `0` disables the timeout.
+
 ### log
 
 #### log.level: string

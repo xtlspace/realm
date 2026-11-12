@@ -23,6 +23,7 @@ pub async fn run_udp(endpoint: Endpoint) -> Result<()> {
         raddr,
         bind_opts,
         conn_opts,
+        sni,
         ..
     } = endpoint;
 
@@ -35,7 +36,7 @@ pub async fn run_udp(endpoint: Endpoint) -> Result<()> {
     let conn_opts = Ref::new(&conn_opts);
     let sockmap = Ref::new(&sockmap);
     loop {
-        if let Err(e) = associate_and_relay(lis, raddr, conn_opts, sockmap).await {
+        if let Err(e) = associate_and_relay(lis, raddr, conn_opts, sni.as_ref(), sockmap).await {
             log::error!("[udp]error: {}", e);
         }
     }

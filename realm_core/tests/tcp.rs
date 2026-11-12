@@ -20,6 +20,7 @@ async fn tcp() {
         conn_opts: Default::default(),
         bind_opts: Default::default(),
         extra_raddrs: Vec::new(),
+        sni: None,
     };
 
     tokio::spawn(run_tcp(endpoint));

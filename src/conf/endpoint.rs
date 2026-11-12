@@ -1,7 +1,9 @@
 use serde::{Serialize, Deserialize};
+use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 
 use realm_core::endpoint::{Endpoint, RemoteAddr};
+use realm_core::sni::{SniRoute, SniRoutes, DEFAULT_TIMEOUT};
 
 #[cfg(feature = "balance")]
 use realm_core::balance::Balancer;
@@ -10,6 +12,20 @@ use realm_core::balance::Balancer;
 use realm_core::kaminari::mix::{MixAccept, MixConnect};
 
 use super::{Config, NetConf, NetInfo, DnsConf};
+
+/// Sni route target, either a plain `remote` or with its own dns options.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum SniTargetConf {
+    Addr(String),
+    Detail {
+        remote: String,
+
+        #[serde(default)]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        dns: Option<DnsConf>,
+    },
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EndpointConf {
@@ -46,6 +62,14 @@ pub struct EndpointConf {
     pub remote_transport: Option<String>,
 
     #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sni: Option<BTreeMap<String, SniTargetConf>>,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sni_timeout: Option<usize>,
+
+    #[serde(default)]
     #[serde(skip_serializing_if = "Config::is_empty")]
     pub network: NetConf,
 
@@ -76,6 +100,38 @@ impl EndpointConf {
             let addr = iter.next().unwrap().to_string();
             RemoteAddr::DomainName(addr, port)
         }
+    }
+
+    fn build_sni(&self) -> Option<SniRoutes> {
+        let sni = self.sni.as_ref()?;
+
+        let routes = sni
+            .iter()
+            .map(|(name, target)| {
+                let (remote, dns) = match target {
+                    SniTargetConf::Addr(remote) => (remote, None),
+                    SniTargetConf::Detail { remote, dns } => (remote, dns.as_ref()),
+                };
+
+                // route dns inherits the endpoint one (which inherits the global one)
+                let resolver = dns.and_then(|dns| {
+                    let mut conf = self.dns.clone();
+                    conf.rst_field(dns);
+                    conf.build_resolver()
+                });
+
+                SniRoute {
+                    server_name: name.to_ascii_lowercase(),
+                    raddr: Self::build_remote_x(remote),
+                    resolver,
+                }
+            })
+            .collect();
+
+        Some(SniRoutes {
+            routes,
+            timeout: self.sni_timeout.unwrap_or(DEFAULT_TIMEOUT),
+        })
     }
 
     fn build_send_through(&self) -> Option<SocketAddr> {
@@ -160,7 +216,9 @@ impl Config for EndpointConf {
         let laddr = self.build_local();
         let raddr = self.build_remote();
 
-        let extra_raddrs = self.extra_remotes.iter().map(|r| Self::build_remote_x(r)).collect();
+        let extra_raddrs: Vec<RemoteAddr> = self.extra_remotes.iter().map(|r| Self::build_remote_x(r)).collect();
+
+        let sni = self.build_sni();
 
         // build partial conn_opts from netconf
         let NetInfo {
@@ -188,6 +246,29 @@ impl Config for EndpointConf {
         // per-endpoint dns resolver
         conn_opts.resolver = self.dns.build_resolver();
 
+        if sni.is_some() {
+            if !extra_raddrs.is_empty() {
+                panic!("[tcp]sni endpoints do not support extra_remotes");
+            }
+
+            #[cfg(not(feature = "quic-sni"))]
+            if use_udp {
+                panic!("[tcp]sni over udp requires the `quic-sni` feature");
+            }
+
+            #[cfg(feature = "proxy")]
+            if !no_tcp && conn_opts.proxy_opts.accept_proxy {
+                panic!("[tcp]sni endpoints do not support accept_proxy");
+            }
+
+            #[cfg(feature = "transport")]
+            if !no_tcp && conn_opts.transport.is_some() {
+                panic!("[tcp]sni endpoints do not support transport");
+            }
+
+            let _ = use_udp;
+        }
+
         EndpointInfo {
             no_tcp,
             use_udp,
@@ -197,6 +278,7 @@ impl Config for EndpointConf {
                 bind_opts,
                 conn_opts,
                 extra_raddrs,
+                sni,
             },
         }
     }
@@ -228,6 +310,8 @@ impl Config for EndpointConf {
             remote_transport,
             network: Default::default(),
             dns: Default::default(),
+            sni: None,
+            sni_timeout: None,
             extra_remotes: Vec::new(),
             balance: None,
         }
