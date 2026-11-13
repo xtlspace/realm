@@ -248,6 +248,9 @@ pub async fn associate_and_relay(
     }
 }
 
+#[cfg(feature = "proxy")]
+const MAX_NODE_DATAGRAM: usize = 1452;
+
 #[cfg_attr(not(feature = "proxy"), allow(unused_variables))]
 async fn send_packets(
     rsock: &UdpSocket,
@@ -267,7 +270,26 @@ async fn send_packets(
             local_addr
         };
         let (h, n) = super::proxy::build_udp_v2_header(laddr, dst);
-        return batched::send_all_with_header(rsock, pkts.iter().map(|x| x.ref_with_addr(&target)), &h[..n]).await;
+
+        // The node receives QUIC datagrams into a buffer of MAX_NODE_DATAGRAM
+        // (quic-go's protocol.MaxPacketBufferSize). Prepending the PROXY header
+        // to a full-size datagram pushes the IP packet past a 1500-byte MTU, so
+        // it gets fragmented or rejected and every large packet is lost, which
+        // stalls the QUIC connection.
+        //
+        // Only attach the header when the resulting datagram still fits. Larger
+        // ones are sent without it: the node maps headerless datagrams of a
+        // known transport through the association's existing entry.
+        let limit = MAX_NODE_DATAGRAM.saturating_sub(n);
+        let (small, large): (Vec<&Packet>, Vec<&Packet>) = pkts.iter().partition(|pkt| pkt.cursor as usize <= limit);
+
+        if !small.is_empty() {
+            batched::send_all_with_header(rsock, small.into_iter().map(|x| x.ref_with_addr(&target)), &h[..n]).await?;
+        }
+        if !large.is_empty() {
+            batched::send_all(rsock, large.into_iter().map(|x| x.ref_with_addr(&target))).await?;
+        }
+        return Ok(());
     }
 
     batched::send_all(rsock, pkts.iter().map(|x| x.ref_with_addr(&target))).await

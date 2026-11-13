@@ -3,4 +3,4 @@
 .DS_Store
 .vscode
 .helix
-
+/build_assets
