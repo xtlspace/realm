@@ -57,21 +57,6 @@ impl SockMap {
         activity
     }
 
-    #[inline]
-    pub fn find_or_insert<E, F>(&self, addr: &SocketAddr, f: F) -> Result<(Arc<UdpSocket>, SocketAddr), E>
-    where
-        F: FnOnce() -> Result<(Arc<UdpSocket>, SocketAddr), E>,
-    {
-        match self.find(addr) {
-            Some(x) => Ok(x),
-            None => {
-                let (socket, raddr) = f()?;
-                self.insert(*addr, socket.clone(), raddr);
-                Ok((socket, raddr))
-            }
-        }
-    }
-
     /// Mark client activity of an association.
     #[inline]
     pub fn touch(&self, addr: &SocketAddr) {

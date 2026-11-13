@@ -236,20 +236,38 @@ pub async fn associate_and_relay(
 
             // plain route
             let raddr = default_addr.unwrap();
-            let (rsock, _) = sockmap.find_or_insert(&laddr, || {
+
+            // PROXY-header UDP flows (send_proxy) hide realm's transport change
+            // from quic-go inside the node's reverse map. Tearing the
+            // association down on a one-directional (node->client) idle window
+            // churns the source port, which leaves the node sending to a dead
+            // socket and stalls the flow. Keep such associations alive based on
+            // client activity instead, so the source port stays stable across
+            // idle pauses. Plain UDP keeps the existing node->client timeout.
+            #[cfg(feature = "proxy")]
+            let client_based = conn_opts.proxy_opts.send_proxy;
+            #[cfg(not(feature = "proxy"))]
+            let client_based = false;
+
+            let rsock = if let Some((rsock, _)) = sockmap.find(&laddr) {
+                rsock
+            } else {
                 let s = Arc::new(socket::associate(&raddr, &conn_opts)?);
-                tokio::spawn(send_back(lis, laddr, s.clone(), conn_opts, sockmap, None));
+                let activity = if client_based {
+                    Some(sockmap.insert(laddr, s.clone(), raddr))
+                } else {
+                    sockmap.insert(laddr, s.clone(), raddr);
+                    None
+                };
+                tokio::spawn(send_back(lis, laddr, s.clone(), conn_opts, sockmap, activity));
                 log::info!("[udp]new association {} => {} as {}", laddr, *rname, raddr);
-                Result::Ok((s, raddr))
-            })?;
+                s
+            };
 
             send_packets(&rsock, pkts, raddr, conn_opts.as_ref(), laddr, local_addr).await?;
         }
     }
 }
-
-#[cfg(feature = "proxy")]
-const MAX_NODE_DATAGRAM: usize = 1452;
 
 #[cfg_attr(not(feature = "proxy"), allow(unused_variables))]
 async fn send_packets(
@@ -270,26 +288,7 @@ async fn send_packets(
             local_addr
         };
         let (h, n) = super::proxy::build_udp_v2_header(laddr, dst);
-
-        // The node receives QUIC datagrams into a buffer of MAX_NODE_DATAGRAM
-        // (quic-go's protocol.MaxPacketBufferSize). Prepending the PROXY header
-        // to a full-size datagram pushes the IP packet past a 1500-byte MTU, so
-        // it gets fragmented or rejected and every large packet is lost, which
-        // stalls the QUIC connection.
-        //
-        // Only attach the header when the resulting datagram still fits. Larger
-        // ones are sent without it: the node maps headerless datagrams of a
-        // known transport through the association's existing entry.
-        let limit = MAX_NODE_DATAGRAM.saturating_sub(n);
-        let (small, large): (Vec<&Packet>, Vec<&Packet>) = pkts.iter().partition(|pkt| pkt.cursor as usize <= limit);
-
-        if !small.is_empty() {
-            batched::send_all_with_header(rsock, small.into_iter().map(|x| x.ref_with_addr(&target)), &h[..n]).await?;
-        }
-        if !large.is_empty() {
-            batched::send_all(rsock, large.into_iter().map(|x| x.ref_with_addr(&target))).await?;
-        }
-        return Ok(());
+        return batched::send_all_with_header(rsock, pkts.iter().map(|x| x.ref_with_addr(&target)), &h[..n]).await;
     }
 
     batched::send_all(rsock, pkts.iter().map(|x| x.ref_with_addr(&target))).await
