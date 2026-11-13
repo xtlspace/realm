@@ -8,6 +8,7 @@ pub const TCP_TIMEOUT: usize = 5;
 pub const TCP_KEEPALIVE: usize = 15;
 pub const TCP_KEEPALIVE_PROBE: usize = 3;
 pub const UDP_TIMEOUT: usize = 30;
+pub const UDP_IDLE_TIMEOUT: usize = 300;
 
 // default haproxy proxy-protocol timeout
 pub const PROXY_PROTOCOL_TIMEOUT: usize = 5;

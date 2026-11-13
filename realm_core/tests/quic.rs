@@ -205,6 +205,8 @@ fn endpoint(port: u16, default: SocketAddr, route: SocketAddr) -> Endpoint {
                 server_name: "a.test".to_string(),
                 raddr: RemoteAddr::SocketAddr(route),
                 resolver: None,
+                bind_interface: None,
+                bind_address: None,
             }],
             timeout: 5,
         }),
@@ -256,6 +258,150 @@ async fn quic_sni_routing() {
     assert_eq!(default_backend.await.unwrap(), vec![packet]);
 }
 
+#[tokio::test]
+async fn quic_sni_route_sticky_after_idle() {
+    let _ = env_logger::try_init();
+
+    let route_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let route_addr = route_sock.local_addr().unwrap();
+
+    // backends reply with their id and record every datagram
+    let route_backend = tokio::spawn(async move {
+        let mut got = Vec::new();
+        let mut buf = vec![0u8; 4096];
+
+        for _ in 0..2 {
+            let Ok(Ok((n, peer))) = tokio::time::timeout(Duration::from_secs(5), route_sock.recv_from(&mut buf)).await
+            else {
+                break;
+            };
+
+            got.push(buf[..n].to_vec());
+            route_sock.send_to(&[1], peer).await.unwrap();
+        }
+
+        got
+    });
+
+    let default_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let default_addr = default_sock.local_addr().unwrap();
+
+    let port = free_port();
+    let mut ep = endpoint(port, default_addr, route_addr);
+    // associations expire after 1s of client silence
+    ep.conn_opts.udp_idle_timeout = 1;
+
+    tokio::spawn(run_udp(ep));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let realm: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+    let cli = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut resp = [0u8; 8];
+
+    let dcid = [5u8, 5, 5, 5, 5, 5, 5, 5];
+    let hello = client_hello("a.test");
+    let packet = build_initial(&dcid, &hello, 2, 0);
+
+    cli.send_to(&packet, realm).await.unwrap();
+    let (n, _) = tokio::time::timeout(Duration::from_secs(2), cli.recv_from(&mut resp))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&resp[..n], &[1]);
+
+    // let the association expire
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    // short header packets cannot be sniffed: the cached route must be reused
+    let short = vec![0x40u8; 64];
+    cli.send_to(&short, realm).await.unwrap();
+
+    let (n, _) = tokio::time::timeout(Duration::from_secs(2), cli.recv_from(&mut resp))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&resp[..n], &[1]);
+
+    let got = route_backend.await.unwrap();
+    assert_eq!(got.len(), 2);
+    assert_eq!(got[0], packet);
+    assert_eq!(got[1], short);
+
+    // the default backend must never be used
+    let mut buf = [0u8; 16];
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), default_sock.recv_from(&mut buf))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn quic_sni_association_kept_alive_by_client() {
+    let _ = env_logger::try_init();
+
+    let route_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let route_addr = route_sock.local_addr().unwrap();
+
+    let route_backend = tokio::spawn(async move {
+        let mut got = Vec::new();
+        let mut buf = vec![0u8; 4096];
+
+        for _ in 0..5 {
+            let Ok(Ok((n, peer))) = tokio::time::timeout(Duration::from_secs(5), route_sock.recv_from(&mut buf)).await
+            else {
+                break;
+            };
+
+            got.push((peer, buf[..n].to_vec()));
+            route_sock.send_to(&[1], peer).await.unwrap();
+        }
+
+        got
+    });
+
+    let port = free_port();
+    let mut ep = endpoint(port, route_addr, route_addr);
+    ep.conn_opts.udp_idle_timeout = 1;
+
+    tokio::spawn(run_udp(ep));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let realm: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+    let cli = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut resp = [0u8; 8];
+
+    let dcid = [6u8, 6, 6, 6, 6, 6, 6, 6];
+    let hello = client_hello("a.test");
+    let packet = build_initial(&dcid, &hello, 2, 0);
+
+    cli.send_to(&packet, realm).await.unwrap();
+    let (n, _) = tokio::time::timeout(Duration::from_secs(2), cli.recv_from(&mut resp))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&resp[..n], &[1]);
+
+    // keep the client active longer than the idle timeout
+    for _ in 0..4 {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        cli.send_to(&vec![0x40u8; 32], realm).await.unwrap();
+
+        let (n, _) = tokio::time::timeout(Duration::from_secs(2), cli.recv_from(&mut resp))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&resp[..n], &[1]);
+    }
+
+    let got = route_backend.await.unwrap();
+    assert_eq!(got.len(), 5);
+
+    // the same association (same source port) is reused, no reconnect
+    let expected = got[0].0;
+    assert!(got.iter().all(|(peer, _)| *peer == expected));
+}
+
 #[cfg(feature = "proxy")]
 #[tokio::test]
 async fn quic_sni_with_send_proxy() {
@@ -294,7 +440,8 @@ async fn quic_sni_with_send_proxy() {
 }
 
 #[tokio::test]
-async fn quic_sni_fragmented() {    let _ = env_logger::try_init();
+async fn quic_sni_fragmented() {
+    let _ = env_logger::try_init();
 
     let (route_addr, route_backend) = spawn_backend(1, 2).await;
 

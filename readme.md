@@ -284,6 +284,7 @@ remote = "www.google.com:443"
 │   ├── ipv6_only
 │   ├── tcp_timeout
 │   ├── udp_timeout
+│   ├── udp_idle_timeout
 │   ├── tcp_keepalive
 │   ├── tcp_keepalive_probe
 │   ├── send_mptcp
@@ -432,6 +433,7 @@ remote = "127.0.0.1:8443" # default
 [endpoints.sni]
 "example.com" = "1.1.1.1:443"
 "www.example.com" = { remote = "origin.example.com:443", dns = { mode = "ipv4_only" } }
+"special.example.com" = { remote = "origin.example.com:443", interface = "eth1", through = "172.16.233.2" }
 ```
 
 QUIC (udp) is supported as well: enable udp on the endpoint and the initial
@@ -458,8 +460,10 @@ Notes:
   time), packets are then replayed to the selected route. encrypted client
   hello (ECH) and unsupported quic versions fall back to the default route.
 - server name matching is case-insensitive, `*.example.com` is supported.
-- a route may carry its own [dns](#dns) options, unset fields inherit the
-  endpoint dns (and therefore the global one).
+- a route may carry its own [dns](#dns) options, outbound `interface`
+  (`SO_BINDTODEVICE`, linux only) and `through` (outbound source address).
+  Unset fields inherit the endpoint options.
+- unknown options inside a route table are reported on stderr and ignored.
 - `sni_timeout` (seconds, default 5) limits how long to wait for the client
   hello. `0` disables the timeout.
 
@@ -605,11 +609,25 @@ default: 5
 
 #### network.udp_timeout: unsigned int
 
-Terminate udp association after `timeout`.
+Terminate udp association after `timeout` without receiving any packet from the
+remote side.
 
 The timeout value must be properly configured in case of memory leak. Do not use a large `timeout`!
 
+Not used by sni-routed endpoints, see [network.udp_idle_timeout](#networkudp_idle_timeout-unsigned-int).
+
 default: 30
+
+#### network.udp_idle_timeout: unsigned int
+
+Idle timeout of udp associations on sni-routed (quic) endpoints, measured by
+**client** activity instead of remote replies. This keeps long-lived quic
+connections alive through idle periods, while still reclaiming associations of
+clients that are gone.
+
+`0` means never expire.
+
+default: 300
 
 #### network.tcp_keepalive: unsigned int
 

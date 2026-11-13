@@ -1,9 +1,11 @@
 use std::io::Result;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 
 use super::SockMap;
+use super::sockmap::now_millis;
 use super::{socket, batched};
 
 use crate::trick::Ref;
@@ -20,6 +22,9 @@ use std::io::{Error, ErrorKind};
 use std::time::Duration;
 #[cfg(feature = "quic-sni")]
 use tokio::time::Instant;
+
+#[cfg(feature = "quic-sni")]
+use crate::sni::SniRoute;
 
 #[cfg(feature = "quic-sni")]
 use crate::dns::Resolver;
@@ -135,6 +140,9 @@ pub async fn associate_and_relay(
     #[cfg(feature = "quic-sni")]
     let mut pending: HashMap<SocketAddr, PendingFlow> = HashMap::new();
 
+    #[cfg(feature = "quic-sni")]
+    let mut cache = RouteCache::new();
+
     #[cfg(not(feature = "quic-sni"))]
     let routes = {
         let _ = routes;
@@ -183,6 +191,15 @@ pub async fn associate_and_relay(
         for pkts in registry.group_iter() {
             let laddr: SocketAddr = pkts[0].addr.clone().into();
 
+            // mark client activity, used by the association idle timeout
+            sockmap.touch(&laddr);
+
+            #[cfg(feature = "quic-sni")]
+            if routes.is_some() {
+                // keep the sticky route fresh while the association is alive
+                cache.touch(&laddr);
+            }
+
             // existing association
             if let Some((rsock, target)) = sockmap.find(&laddr) {
                 send_packets(&rsock, pkts, target, conn_opts.as_ref(), laddr, local_addr).await?;
@@ -192,6 +209,8 @@ pub async fn associate_and_relay(
             // new flow, routed by quic sni
             #[cfg(feature = "quic-sni")]
             if let Some(routes) = routes {
+                let cached = cache.get(&laddr);
+
                 let decision = {
                     let flow = pending.entry(laddr).or_insert_with(|| PendingFlow::new(routes.timeout));
 
@@ -199,10 +218,14 @@ pub async fn associate_and_relay(
                         flow.push(pkt.data());
                     }
 
-                    flow.decision(routes, rname.as_ref())
+                    flow.decision(routes, rname.as_ref(), cached.as_ref())
                 };
 
-                if let Some(choice) = decision {
+                if let Some((choice, cacheable)) = decision {
+                    if cacheable {
+                        cache.put(&laddr, choice.clone());
+                    }
+
                     if let Some(flow) = pending.remove(&laddr) {
                         relay_pending(flow, laddr, choice, lis, conn_opts, sockmap, local_addr).await?;
                     }
@@ -215,7 +238,7 @@ pub async fn associate_and_relay(
             let raddr = default_addr.unwrap();
             let (rsock, _) = sockmap.find_or_insert(&laddr, || {
                 let s = Arc::new(socket::associate(&raddr, &conn_opts)?);
-                tokio::spawn(send_back(lis, laddr, s.clone(), conn_opts, sockmap));
+                tokio::spawn(send_back(lis, laddr, s.clone(), conn_opts, sockmap, None));
                 log::info!("[udp]new association {} => {} as {}", laddr, *rname, raddr);
                 Result::Ok((s, raddr))
             })?;
@@ -298,21 +321,117 @@ impl PendingFlow {
         }
     }
 
-    fn decision(&self, routes: &SniRoutes, default: &RemoteAddr) -> Option<(RemoteAddr, Option<Resolver>)> {
+    fn decision(
+        &self,
+        routes: &SniRoutes,
+        default: &RemoteAddr,
+        cached: Option<&RouteChoice>,
+    ) -> Option<(RouteChoice, bool)> {
+        let fallback = || {
+            cached.cloned().unwrap_or_else(|| RouteChoice {
+                raddr: default.clone(),
+                route: None,
+                server_name: None,
+            })
+        };
+
         match &self.state {
-            quic::Sniff::Complete(server_name) => Some(select_route(routes, server_name.as_deref(), default)),
-            quic::Sniff::NotQuic => Some((default.clone(), None)),
-            quic::Sniff::Pending if self.overflowed => Some((default.clone(), None)),
+            quic::Sniff::Complete(server_name) => {
+                let route = server_name.as_deref().and_then(|name| routes.find(name));
+
+                let choice = match route {
+                    Some(route) => RouteChoice {
+                        raddr: route.raddr.clone(),
+                        route: Some(route.clone()),
+                        server_name: server_name.clone(),
+                    },
+                    None => RouteChoice {
+                        raddr: default.clone(),
+                        route: None,
+                        server_name: server_name.clone(),
+                    },
+                };
+
+                Some((choice, true))
+            }
+
+            // short header packet, cannot sniff: keep the previously selected route
+            quic::Sniff::NotQuic => Some((fallback(), false)),
+            quic::Sniff::Pending if self.overflowed => Some((fallback(), false)),
             quic::Sniff::Pending => None,
         }
     }
 }
 
 #[cfg(feature = "quic-sni")]
-fn select_route(routes: &SniRoutes, server_name: Option<&str>, default: &RemoteAddr) -> (RemoteAddr, Option<Resolver>) {
-    match server_name.and_then(|name| routes.find(name)) {
-        Some(route) => (route.raddr.clone(), route.resolver.clone()),
-        None => (default.clone(), None),
+const SNI_CACHE_TTL: u64 = 600;
+#[cfg(feature = "quic-sni")]
+const SNI_CACHE_CAP: usize = 65536;
+
+/// Route selected by sni sniffing, kept sticky per client address.
+#[cfg(feature = "quic-sni")]
+#[derive(Clone)]
+struct RouteChoice {
+    raddr: RemoteAddr,
+    route: Option<SniRoute>,
+    server_name: Option<String>,
+}
+
+#[cfg(feature = "quic-sni")]
+struct CachedRoute {
+    choice: RouteChoice,
+    last_seen: std::time::Instant,
+}
+
+#[cfg(feature = "quic-sni")]
+struct RouteCache {
+    map: HashMap<SocketAddr, CachedRoute>,
+}
+
+#[cfg(feature = "quic-sni")]
+impl RouteCache {
+    fn new() -> Self {
+        Self { map: HashMap::new() }
+    }
+
+    fn get(&mut self, addr: &SocketAddr) -> Option<RouteChoice> {
+        let now = std::time::Instant::now();
+
+        match self.map.get_mut(addr) {
+            Some(entry) if now.duration_since(entry.last_seen).as_secs() < SNI_CACHE_TTL => {
+                entry.last_seen = now;
+                Some(entry.choice.clone())
+            }
+            Some(_) => {
+                self.map.remove(addr);
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn touch(&mut self, addr: &SocketAddr) {
+        if let Some(entry) = self.map.get_mut(addr) {
+            entry.last_seen = std::time::Instant::now();
+        }
+    }
+
+    fn put(&mut self, addr: &SocketAddr, choice: RouteChoice) {
+        let now = std::time::Instant::now();
+
+        if self.map.len() >= SNI_CACHE_CAP && !self.map.contains_key(addr) {
+            self.map
+                .retain(|_, entry| now.duration_since(entry.last_seen).as_secs() < SNI_CACHE_TTL);
+
+            while self.map.len() >= SNI_CACHE_CAP {
+                let Some(victim) = self.map.keys().next().copied() else {
+                    break;
+                };
+                self.map.remove(&victim);
+            }
+        }
+
+        self.map.insert(*addr, CachedRoute { choice, last_seen: now });
     }
 }
 
@@ -339,7 +458,11 @@ async fn flush_pending(
             relay_pending(
                 flow,
                 laddr,
-                (rname.as_ref().clone(), None),
+                RouteChoice {
+                    raddr: rname.as_ref().clone(),
+                    route: None,
+                    server_name: None,
+                },
                 lis,
                 conn_opts,
                 sockmap,
@@ -357,34 +480,54 @@ async fn flush_pending(
 async fn relay_pending(
     flow: PendingFlow,
     laddr: SocketAddr,
-    (raddr, resolver): (RemoteAddr, Option<Resolver>),
+    choice: RouteChoice,
     lis: Ref<UdpSocket>,
     conn_opts: Ref<ConnectOpts>,
     sockmap: Ref<SockMap>,
     local_addr: SocketAddr,
 ) -> Result<()> {
-    let resolver = resolver.or_else(|| conn_opts.resolver.clone());
+    // route-specific connection options (dns resolver / interface / source address)
+    let mut opts = conn_opts.as_ref().clone();
+    if let Some(route) = &choice.route {
+        route.apply_conn_opts(&mut opts);
+    }
 
-    let (rsock, target) = open_association(lis, laddr, &raddr, resolver.as_ref(), conn_opts, sockmap).await?;
-
-    log::debug!(
-        "[udp]quic route {} => {} as {}, buffered {} datagrams",
+    let (rsock, target) = open_association(
+        lis,
         laddr,
-        raddr,
+        &choice.raddr,
+        opts.resolver.as_ref(),
+        conn_opts,
+        &opts,
+        sockmap,
+    )
+    .await?;
+
+    let server_name = choice.server_name.as_deref().unwrap_or("none");
+    let default = if choice.route.is_none() { ", default" } else { "" };
+
+    log::info!(
+        "[udp]new association {} => {} (sni: {}{}) as {}, buffered {} datagrams",
+        laddr,
+        choice.raddr,
+        server_name,
+        default,
         target,
         flow.datagrams.len()
     );
 
-    send_buffered(&rsock, target, &flow.datagrams, conn_opts.as_ref(), laddr, local_addr).await
+    send_buffered(&rsock, target, &flow.datagrams, &opts, laddr, local_addr).await
 }
 
 #[cfg(feature = "quic-sni")]
+#[allow(clippy::too_many_arguments)]
 async fn open_association(
     lis: Ref<UdpSocket>,
     laddr: SocketAddr,
     raddr: &RemoteAddr,
     resolver: Option<&Resolver>,
-    conn_opts: Ref<ConnectOpts>,
+    send_back_opts: Ref<ConnectOpts>,
+    associate_opts: &ConnectOpts,
     sockmap: Ref<SockMap>,
 ) -> Result<(Arc<UdpSocket>, SocketAddr)> {
     let addr = resolve_addr_with(raddr, resolver)
@@ -393,10 +536,16 @@ async fn open_association(
         .next()
         .ok_or_else(|| Error::new(ErrorKind::AddrNotAvailable, "could not resolve remote address"))?;
 
-    let s = Arc::new(socket::associate(&addr, &conn_opts)?);
-    tokio::spawn(send_back(lis, laddr, s.clone(), conn_opts, sockmap));
-    sockmap.insert(laddr, s.clone(), addr);
-    log::info!("[udp]new association {} => {} as {}", laddr, raddr, addr);
+    let s = Arc::new(socket::associate(&addr, associate_opts)?);
+    let activity = sockmap.insert(laddr, s.clone(), addr);
+    tokio::spawn(send_back(
+        lis,
+        laddr,
+        s.clone(),
+        send_back_opts,
+        sockmap,
+        Some(activity),
+    ));
 
     Ok((s, addr))
 }
@@ -446,25 +595,69 @@ async fn send_back(
     rsock: Arc<UdpSocket>,
     conn_opts: Ref<ConnectOpts>,
     sockmap: Ref<SockMap>,
+    activity: Option<Arc<AtomicU64>>,
 ) {
     let mut registry = Registry::new(batched::MAX_PACKETS);
     let timeout = conn_opts.associate_timeout;
+    let idle_timeout = conn_opts.udp_idle_timeout;
     let laddr_s: SockAddrStore = laddr.into();
 
-    loop {
-        match timeoutfut(registry.batched_recv_on(&rsock), timeout).await {
-            Err(_) => {
-                log::debug!("[udp]rear recvfrom timeout");
-                break;
+    'recv: loop {
+        let recv = registry.batched_recv_on(&rsock);
+
+        match &activity {
+            // client-activity based lifetime, sni routed associations
+            Some(activity) => {
+                if idle_timeout == 0 {
+                    match recv.await {
+                        Ok(()) => {}
+                        Err(e) => {
+                            log::error!("[udp]rear recvfrom failed: {}", e);
+                            break;
+                        }
+                    }
+                } else {
+                    let idle_ms = idle_timeout as u64 * 1000;
+                    let elapsed = now_millis().saturating_sub(activity.load(Ordering::Relaxed));
+
+                    if elapsed >= idle_ms {
+                        log::info!(
+                            "[udp]remove association for {} (idle {}s, no client traffic)",
+                            laddr,
+                            idle_timeout
+                        );
+                        break 'recv;
+                    }
+
+                    let wait = (idle_ms - elapsed).div_ceil(1000);
+
+                    match timeoutfut(recv, wait as usize).await {
+                        // re-check activity on the next round
+                        Err(_) => continue 'recv,
+                        Ok(Err(e)) => {
+                            log::error!("[udp]rear recvfrom failed: {}", e);
+                            break;
+                        }
+                        Ok(Ok(())) => {}
+                    }
+                }
             }
-            Ok(Err(e)) => {
-                log::error!("[udp]rear recvfrom failed: {}", e);
-                break;
-            }
-            Ok(Ok(())) => {
-                log::debug!("[udp]rear batched recvfrom[{}]", registry.count())
-            }
-        };
+
+            // backend-activity based lifetime, plain udp associations
+            None => match timeoutfut(recv, timeout).await {
+                Err(_) => {
+                    log::debug!("[udp]rear recvfrom timeout");
+                    break;
+                }
+                Ok(Err(e)) => {
+                    log::error!("[udp]rear recvfrom failed: {}", e);
+                    break;
+                }
+                Ok(Ok(())) => {}
+            },
+        }
+
+        log::debug!("[udp]rear batched recvfrom[{}]", registry.count());
 
         let pkts = registry.iter().map(|pkt| pkt.ref_with_addr(&laddr_s));
         if let Err(e) = batched::send_all(&lsock, pkts).await {

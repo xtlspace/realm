@@ -2,7 +2,7 @@ use serde::{Serialize, Deserialize};
 use realm_core::endpoint::{BindOpts, ConnectOpts};
 
 use super::Config;
-use crate::consts::{TCP_TIMEOUT, UDP_TIMEOUT};
+use crate::consts::{TCP_TIMEOUT, UDP_TIMEOUT, UDP_IDLE_TIMEOUT};
 use crate::consts::{TCP_KEEPALIVE, TCP_KEEPALIVE_PROBE};
 use crate::consts::PROXY_PROTOCOL_TIMEOUT;
 
@@ -54,6 +54,10 @@ pub struct NetConf {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub udp_timeout: Option<usize>,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub udp_idle_timeout: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -72,7 +76,7 @@ impl Config for NetConf {
             no_tcp, use_udp, ipv6_only,
             send_mptcp, accept_mptcp,
             send_proxy, accept_proxy, accept_proxy_timeout,
-            tcp_keepalive, tcp_keepalive_probe, tcp_timeout, udp_timeout
+            tcp_keepalive, tcp_keepalive_probe, tcp_timeout, udp_timeout, udp_idle_timeout
         ]
     }
 
@@ -95,6 +99,7 @@ impl Config for NetConf {
         let tcp_kpa_probe = unbox!(tcp_keepalive_probe, TCP_KEEPALIVE_PROBE);
         let tcp_timeout = unbox!(tcp_timeout, TCP_TIMEOUT);
         let udp_timeout = unbox!(udp_timeout, UDP_TIMEOUT);
+        let udp_idle_timeout = unbox!(udp_idle_timeout, UDP_IDLE_TIMEOUT);
 
         let bind_opts = BindOpts {
             ipv6_only,
@@ -107,6 +112,7 @@ impl Config for NetConf {
             tcp_keepalive_probe: tcp_kpa_probe,
             connect_timeout: tcp_timeout,
             associate_timeout: udp_timeout,
+            udp_idle_timeout,
 
             // from endpoint
             bind_address: None,
@@ -154,6 +160,7 @@ impl Config for NetConf {
         rst!(self, tcp_keepalive_probe, other);
         rst!(self, tcp_timeout, other);
         rst!(self, udp_timeout, other);
+        rst!(self, udp_idle_timeout, other);
         rst!(self, send_proxy, other);
         rst!(self, accept_proxy, other);
         rst!(self, accept_proxy_timeout, other);
@@ -173,6 +180,7 @@ impl Config for NetConf {
         take!(self, tcp_keepalive_probe, other);
         take!(self, tcp_timeout, other);
         take!(self, udp_timeout, other);
+        take!(self, udp_idle_timeout, other);
         take!(self, send_proxy, other);
         take!(self, accept_proxy, other);
         take!(self, accept_proxy_timeout, other);
@@ -221,6 +229,7 @@ impl Config for NetConf {
             tcp_keepalive_probe,
             tcp_timeout,
             udp_timeout,
+            udp_idle_timeout: None,
             send_proxy,
             accept_proxy,
             accept_proxy_timeout,

@@ -77,10 +77,10 @@ pub async fn run_tcp(endpoint: Endpoint) -> Result<()> {
             };
 
             let route = sniffed.server_name.as_deref().and_then(|name| routes.find(name));
-            let (target, resolver) = match route {
+            let target = match route {
                 Some(route) => {
                     log::debug!("[tcp]{} sni {:?} => {}", addr, sniffed.server_name, route.raddr);
-                    (&route.raddr, route.resolver.as_ref())
+                    &route.raddr
                 }
                 None => {
                     log::debug!(
@@ -89,14 +89,14 @@ pub async fn run_tcp(endpoint: Endpoint) -> Result<()> {
                         sniffed.server_name,
                         raddr.as_ref()
                     );
-                    (raddr.as_ref(), None)
+                    raddr.as_ref()
                 }
             };
 
-            // route-specific dns resolver
-            let opts = resolver.map(|resolver| {
+            // route-specific connection options (dns resolver / interface / source address)
+            let opts = route.filter(|route| route.has_conn_overrides()).map(|route| {
                 let mut opts = conn_opts.as_ref().clone();
-                opts.resolver = Some(resolver.clone());
+                route.apply_conn_opts(&mut opts);
                 opts
             });
             let opts = opts.as_ref().map(Ref::new).unwrap_or(conn_opts);

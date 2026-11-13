@@ -111,6 +111,8 @@ fn endpoint(port: u16, default: SocketAddr, route: SocketAddr) -> Endpoint {
                 server_name: "a.test".to_string(),
                 raddr: RemoteAddr::SocketAddr(route),
                 resolver: None,
+                bind_interface: None,
+                bind_address: None,
             }],
             timeout: 5,
         }),
@@ -145,6 +147,38 @@ async fn sni_routing() {
     let mut expected = client_hello("b.test");
     expected.extend_from_slice(b"payload");
     assert_eq!(default_backend.await.unwrap(), expected);
+}
+
+#[tokio::test]
+async fn sni_route_bind_address() {
+    let _ = env_logger::try_init();
+
+    let lis = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend_addr = lis.local_addr().unwrap();
+
+    let backend = tokio::spawn(async move {
+        let (mut sock, peer) = lis.accept().await.unwrap();
+        let mut buf = vec![0u8; 1024];
+        let _ = sock.read(&mut buf).await.unwrap();
+        sock.write_all(b"ok").await.unwrap();
+        peer
+    });
+
+    let port = free_port();
+    let mut endpoint = endpoint(port, backend_addr, backend_addr);
+    endpoint.sni.as_mut().unwrap().routes[0].bind_address = Some("127.0.0.2:0".parse().unwrap());
+
+    tokio::spawn(run_tcp(endpoint));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let mut sock = relaying(port).await;
+    let mut ok = [0u8; 2];
+    sock.read_exact(&mut ok).await.unwrap();
+    assert_eq!(&ok, b"ok");
+
+    // outbound connections of this route use the configured source address
+    let peer = backend.await.unwrap();
+    assert_eq!(peer.ip().to_string(), "127.0.0.2");
 }
 
 #[tokio::test]

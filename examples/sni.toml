@@ -7,7 +7,10 @@ remote = "127.0.0.1:8443"
 
 [endpoints.network]
 use_udp = true
+# udp_idle_timeout = 300   # association idle timeout (client activity), 0 = never
 
 [endpoints.sni]
 "example.com" = "1.1.1.1:443"
 "www.example.com" = { remote = "origin.example.com:443", dns = { mode = "ipv4_only" } }
+# per-route outbound options (interface is linux only)
+# "special.example.com" = { remote = "origin.example.com:443", interface = "eth1", through = "172.16.233.2" }

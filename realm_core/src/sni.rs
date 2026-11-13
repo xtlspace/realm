@@ -1,12 +1,13 @@
 //! TLS ClientHello sniffing and sni-based routing.
 
 use std::io::{Result, Error, ErrorKind};
+use std::net::SocketAddr;
 
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 
 use crate::dns::Resolver;
-use crate::endpoint::RemoteAddr;
+use crate::endpoint::{ConnectOpts, RemoteAddr};
 use crate::time::timeoutfut;
 
 /// Max bytes read while sniffing a tls client hello.
@@ -24,6 +25,30 @@ pub struct SniRoute {
     pub raddr: RemoteAddr,
     /// Dns resolver of this route, fallback to the endpoint one if none.
     pub resolver: Option<Resolver>,
+    /// Outbound interface of this route, fallback to the endpoint one if none.
+    pub bind_interface: Option<String>,
+    /// Outbound source address of this route, fallback to the endpoint one if none.
+    pub bind_address: Option<SocketAddr>,
+}
+
+impl SniRoute {
+    /// Whether this route overrides any connection option.
+    pub fn has_conn_overrides(&self) -> bool {
+        self.resolver.is_some() || self.bind_interface.is_some() || self.bind_address.is_some()
+    }
+
+    /// Apply route overrides to endpoint connection options.
+    pub fn apply_conn_opts(&self, opts: &mut ConnectOpts) {
+        if self.resolver.is_some() {
+            opts.resolver = self.resolver.clone();
+        }
+        if self.bind_interface.is_some() {
+            opts.bind_interface = self.bind_interface.clone();
+        }
+        if self.bind_address.is_some() {
+            opts.bind_address = self.bind_address;
+        }
+    }
 }
 
 /// Sni routes of an endpoint.
@@ -351,11 +376,15 @@ mod tests {
                     server_name: "a.example.com".to_string(),
                     raddr: RemoteAddr::DomainName("a.test".into(), 443),
                     resolver: None,
+                    bind_interface: None,
+                    bind_address: None,
                 },
                 SniRoute {
                     server_name: "*.example.org".to_string(),
                     raddr: RemoteAddr::DomainName("b.test".into(), 443),
                     resolver: None,
+                    bind_interface: None,
+                    bind_address: None,
                 },
             ],
             timeout: 5,
@@ -371,5 +400,39 @@ mod tests {
         );
         assert!(routes.find("example.org").is_none());
         assert!(routes.find("unknown.test").is_none());
+    }
+
+    #[test]
+    fn route_conn_opts() {
+        let mut base = ConnectOpts::default();
+        base.bind_interface = Some("eth0".to_string());
+        base.bind_address = Some("1.1.1.1:0".parse().unwrap());
+
+        let route = SniRoute {
+            server_name: "a.test".to_string(),
+            raddr: RemoteAddr::DomainName("a.test".into(), 443),
+            resolver: None,
+            bind_interface: Some("eth1".to_string()),
+            bind_address: Some("2.2.2.2:0".parse().unwrap()),
+        };
+
+        assert!(route.has_conn_overrides());
+
+        let mut opts = base.clone();
+        route.apply_conn_opts(&mut opts);
+
+        assert_eq!(opts.bind_interface.as_deref(), Some("eth1"));
+        assert_eq!(opts.bind_address, Some("2.2.2.2:0".parse().unwrap()));
+
+        // unset route fields keep the endpoint values
+        let route = SniRoute {
+            bind_interface: None,
+            bind_address: None,
+            ..route
+        };
+        let mut opts = base;
+        route.apply_conn_opts(&mut opts);
+        assert_eq!(opts.bind_interface.as_deref(), Some("eth0"));
+        assert_eq!(opts.bind_address, Some("1.1.1.1:0".parse().unwrap()));
     }
 }

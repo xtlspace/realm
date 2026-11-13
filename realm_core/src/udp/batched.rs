@@ -78,6 +78,7 @@ impl Packet {
     }
 
     #[inline]
+    #[cfg(feature = "quic-sni")]
     pub fn data(&self) -> &[u8] {
         &self.buf[..self.cursor as usize]
     }

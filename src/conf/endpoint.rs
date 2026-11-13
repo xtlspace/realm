@@ -1,6 +1,9 @@
 use serde::{Serialize, Deserialize};
 use std::collections::BTreeMap;
+use std::fmt;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+
+use serde::de::{self, IgnoredAny, MapAccess, Visitor};
 
 use realm_core::endpoint::{Endpoint, RemoteAddr};
 use realm_core::sni::{SniRoute, SniRoutes, DEFAULT_TIMEOUT};
@@ -13,18 +16,96 @@ use realm_core::kaminari::mix::{MixAccept, MixConnect};
 
 use super::{Config, NetConf, NetInfo, DnsConf};
 
-/// Sni route target, either a plain `remote` or with its own dns options.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+/// Sni route target, either a plain `remote` or a table with per-route options.
+#[derive(Debug, Serialize, Clone)]
 #[serde(untagged)]
 pub enum SniTargetConf {
     Addr(String),
     Detail {
         remote: String,
 
-        #[serde(default)]
         #[serde(skip_serializing_if = "Option::is_none")]
         dns: Option<DnsConf>,
+
+        #[serde(skip_serializing_if = "Option::is_none")]
+        interface: Option<String>,
+
+        #[serde(skip_serializing_if = "Option::is_none")]
+        through: Option<String>,
+
+        /// Unknown options of the table, reported but not fatal.
+        #[serde(skip)]
+        unknown: Vec<String>,
     },
+}
+
+impl<'de> Deserialize<'de> for SniTargetConf {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct SniTargetVisitor;
+
+        impl<'de> Visitor<'de> for SniTargetVisitor {
+            type Value = SniTargetConf;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a remote address string or a table with `remote`")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(SniTargetConf::Addr(v.to_string()))
+            }
+
+            fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(SniTargetConf::Addr(v))
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut remote = None;
+                let mut dns = None;
+                let mut interface = None;
+                let mut through = None;
+                let mut unknown = Vec::new();
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "remote" => remote = Some(map.next_value::<String>()?),
+                        "dns" => dns = Some(map.next_value::<DnsConf>()?),
+                        "interface" => interface = Some(map.next_value::<String>()?),
+                        "through" => through = Some(map.next_value::<String>()?),
+                        _ => {
+                            map.next_value::<IgnoredAny>()?;
+                            unknown.push(key);
+                        }
+                    }
+                }
+
+                let Some(remote) = remote else {
+                    return Err(de::Error::missing_field("remote"));
+                };
+
+                Ok(SniTargetConf::Detail {
+                    remote,
+                    dns,
+                    interface,
+                    through,
+                    unknown,
+                })
+            }
+        }
+
+        deserializer.deserialize_any(SniTargetVisitor)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -108,10 +189,30 @@ impl EndpointConf {
         let routes = sni
             .iter()
             .map(|(name, target)| {
-                let (remote, dns) = match target {
-                    SniTargetConf::Addr(remote) => (remote, None),
-                    SniTargetConf::Detail { remote, dns } => (remote, dns.as_ref()),
+                let (remote, dns, interface, through, unknown) = match target {
+                    SniTargetConf::Addr(remote) => (remote, None, None, None, &[][..]),
+                    SniTargetConf::Detail {
+                        remote,
+                        dns,
+                        interface,
+                        through,
+                        unknown,
+                    } => (
+                        remote,
+                        dns.as_ref(),
+                        interface.as_ref(),
+                        through.as_ref(),
+                        unknown.as_slice(),
+                    ),
                 };
+
+                if !unknown.is_empty() {
+                    eprintln!(
+                        "[config] sni route \"{}\": unknown option(s) [{}] ignored",
+                        name,
+                        unknown.join(", ")
+                    );
+                }
 
                 // route dns inherits the endpoint one (which inherits the global one)
                 let resolver = dns.and_then(|dns| {
@@ -124,6 +225,8 @@ impl EndpointConf {
                     server_name: name.to_ascii_lowercase(),
                     raddr: Self::build_remote_x(remote),
                     resolver,
+                    bind_interface: interface.cloned(),
+                    bind_address: through.and_then(|x| Self::parse_through(x)),
                 }
             })
             .collect();
@@ -135,12 +238,11 @@ impl EndpointConf {
     }
 
     fn build_send_through(&self) -> Option<SocketAddr> {
-        let Self { through, .. } = self;
-        #[allow(clippy::question_mark)]
-        let through = match through {
-            Some(x) => x,
-            None => return None,
-        };
+        self.through.as_deref().and_then(Self::parse_through)
+    }
+
+    /// Parse a `through` option into a bind address.
+    fn parse_through(through: &str) -> Option<SocketAddr> {
         match through.to_socket_addrs() {
             Ok(mut x) => Some(x.next().unwrap()),
             Err(_) => {
@@ -315,5 +417,47 @@ impl Config for EndpointConf {
             extra_remotes: Vec::new(),
             balance: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::conf::FullConf;
+
+    fn build_endpoint(conf: &str) -> Endpoint {
+        let mut full = FullConf::from_conf_str(conf).unwrap();
+        full.apply_global_opts();
+
+        full.endpoints.into_iter().next().unwrap().build().endpoint
+    }
+
+    #[test]
+    fn sni_route_options() {
+        let endpoint = build_endpoint(
+            r#"
+[[endpoints]]
+listen = "127.0.0.1:1000"
+remote = "127.0.0.1:2000"
+
+[endpoints.sni]
+"a.test" = { remote = "example.com:443", interface = "eth1", through = "10.0.0.1", dns = { mode = "ipv4_only" }, oops = 1 }
+"b.test" = "1.1.1.1:443"
+"#,
+        );
+
+        let sni = endpoint.sni.unwrap();
+        assert_eq!(sni.routes.len(), 2);
+
+        let a = sni.routes.iter().find(|x| x.server_name == "a.test").unwrap();
+        assert_eq!(a.raddr.to_string(), "example.com:443");
+        assert_eq!(a.bind_interface.as_deref(), Some("eth1"));
+        assert_eq!(a.bind_address, Some("10.0.0.1:0".parse().unwrap()));
+        assert!(a.resolver.is_some());
+
+        let b = sni.routes.iter().find(|x| x.server_name == "b.test").unwrap();
+        assert!(b.bind_interface.is_none());
+        assert!(b.bind_address.is_none());
+        assert!(b.resolver.is_none());
     }
 }

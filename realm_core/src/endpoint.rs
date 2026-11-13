@@ -48,6 +48,10 @@ pub struct ConnectOpts {
     pub bind_address: Option<SocketAddr>,
     pub bind_interface: Option<String>,
 
+    /// Idle timeout (secs) of udp associations, 0 means never expire.
+    /// Measured by client activity, used by sni/quic routed endpoints.
+    pub udp_idle_timeout: usize,
+
     /// Dns resolver for remote addresses, fallback to the global one if none.
     pub resolver: Option<Resolver>,
 
@@ -128,6 +132,7 @@ impl Display for ConnectOpts {
             send_mptcp,
             connect_timeout,
             associate_timeout,
+            udp_idle_timeout,
             tcp_keepalive,
             tcp_keepalive_probe,
             bind_address,
@@ -182,8 +187,8 @@ impl Display for ConnectOpts {
 
         write!(
             f,
-            "tcp-keepalive={}s[{}] connect-timeout={}s, associate-timeout={}s; ",
-            tcp_keepalive, tcp_keepalive_probe, connect_timeout, associate_timeout
+            "tcp-keepalive={}s[{}] connect-timeout={}s, associate-timeout={}s, udp-idle-timeout={}s; ",
+            tcp_keepalive, tcp_keepalive_probe, connect_timeout, associate_timeout, udp_idle_timeout
         )?;
 
         #[cfg(feature = "transport")]
