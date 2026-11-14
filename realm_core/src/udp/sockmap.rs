@@ -17,7 +17,7 @@ struct Assoc {
     socket: Arc<UdpSocket>,
     raddr: SocketAddr,
     activity: Arc<AtomicU64>,
-    header_sent: Arc<AtomicBool>,
+    replied: Arc<AtomicBool>,
 }
 
 pub struct SockMap(RwLock<HashMap<SocketAddr, Assoc>>);
@@ -35,7 +35,7 @@ impl SockMap {
 
         sockmap
             .get(addr)
-            .map(|x| (x.socket.clone(), x.raddr, x.header_sent.clone()))
+            .map(|x| (x.socket.clone(), x.raddr, x.replied.clone()))
 
         // drop the lock
     }
@@ -51,7 +51,7 @@ impl SockMap {
         let mut sockmap = self.0.write().unwrap();
 
         let activity = Arc::new(AtomicU64::new(now_millis()));
-        let header_sent = Arc::new(AtomicBool::new(false));
+        let replied = Arc::new(AtomicBool::new(false));
 
         let _ = sockmap.insert(
             addr,
@@ -59,12 +59,12 @@ impl SockMap {
                 socket,
                 raddr,
                 activity: activity.clone(),
-                header_sent: header_sent.clone(),
+                replied: replied.clone(),
             },
         );
 
         // drop the lock
-        (activity, header_sent)
+        (activity, replied)
     }
 
     #[inline]
@@ -80,8 +80,8 @@ impl SockMap {
             Some(x) => Ok(x),
             None => {
                 let (socket, raddr) = f()?;
-                let (_, header_sent) = self.insert(*addr, socket.clone(), raddr);
-                Ok((socket, raddr, header_sent))
+                let (_, replied) = self.insert(*addr, socket.clone(), raddr);
+                Ok((socket, raddr, replied))
             }
         }
     }
@@ -93,6 +93,16 @@ impl SockMap {
 
         if let Some(x) = sockmap.get(addr) {
             x.activity.store(now_millis(), Ordering::Relaxed);
+        }
+    }
+
+    /// Mark that the remote side has replied at least once.
+    #[inline]
+    pub fn mark_replied(&self, addr: &SocketAddr) {
+        let sockmap = self.0.read().unwrap();
+
+        if let Some(x) = sockmap.get(addr) {
+            x.replied.store(true, Ordering::Relaxed);
         }
     }
 

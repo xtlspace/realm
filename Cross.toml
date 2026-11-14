@@ -1,3 +1,6 @@
+[build.env]
+passthrough = ["REALM_VERSION"]
+
 [target.x86_64-pc-windows-gnu]
 pre-build = [
   "apt update",

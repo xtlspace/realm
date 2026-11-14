@@ -404,6 +404,56 @@ async fn quic_sni_association_kept_alive_by_client() {
 
 #[cfg(feature = "proxy")]
 #[tokio::test]
+async fn quic_sni_send_proxy_all_buffered() {
+    use realm_core::endpoint::ProxyOpts;
+
+    let _ = env_logger::try_init();
+
+    let (route_addr, backend) = spawn_backend(1, 2).await;
+
+    let port = free_port();
+    let mut ep = endpoint(port, route_addr, route_addr);
+    ep.conn_opts.proxy_opts = ProxyOpts {
+        send_proxy: true,
+        ..Default::default()
+    };
+
+    tokio::spawn(run_udp(ep));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let realm: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+    let cli = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+    let dcid = [7u8, 7, 7, 7, 7, 7, 7, 7];
+    let hello = client_hello("a.test");
+    let split = 20;
+    let first = build_initial(&dcid, &hello[..split], 2, 0);
+    let second = build_initial(&dcid, &hello[split..], 3, split as u64);
+
+    // no reply before both buffered datagrams are flushed, so both carry the header
+    cli.send_to(&first, realm).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    cli.send_to(&second, realm).await.unwrap();
+
+    let mut resp = [0u8; 8];
+    let _ = tokio::time::timeout(Duration::from_secs(2), cli.recv_from(&mut resp))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let got = backend.await.unwrap();
+    assert_eq!(got.len(), 2);
+
+    for (i, datagram) in got.iter().enumerate() {
+        assert_eq!(&datagram[..12], b"\r\n\r\n\x00\r\nQUIT\n");
+        assert_eq!(datagram[12], 0x21);
+        assert_eq!(datagram[13], 0x12);
+        assert_eq!(&datagram[28..], &[&first, &second][i][..]);
+    }
+}
+
+#[cfg(feature = "proxy")]
+#[tokio::test]
 async fn quic_sni_with_send_proxy() {
     use realm_core::endpoint::ProxyOpts;
 

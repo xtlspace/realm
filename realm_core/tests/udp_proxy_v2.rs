@@ -15,7 +15,7 @@ const SIGNATURE: &[u8; 12] = b"\r\n\r\n\x00\r\nQUIT\n";
 #[tokio::test]
 #[cfg(feature = "proxy")]
 async fn udp_proxy_v2() {
-    env_logger::init();
+    let _ = env_logger::try_init();
 
     let endpoint = Endpoint {
         laddr: "127.0.0.1:11000".parse().unwrap(),
@@ -77,4 +77,61 @@ async fn udp_proxy_v2() {
         assert_eq!(from, server_addr);
         assert_eq!(&buf[..n], b"Pong Pong Pong");
     }
+}
+
+#[tokio::test]
+#[cfg(feature = "proxy")]
+async fn udp_proxy_v2_until_reply() {
+    let _ = env_logger::try_init();
+
+    let endpoint = Endpoint {
+        laddr: "127.0.0.1:11001".parse().unwrap(),
+        raddr: "127.0.0.1:11501"
+            .parse::<SocketAddr>()
+            .map(RemoteAddr::SocketAddr)
+            .unwrap(),
+        conn_opts: ConnectOpts {
+            proxy_opts: ProxyOpts {
+                send_proxy: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        bind_opts: Default::default(),
+        extra_raddrs: Vec::new(),
+        sni: None,
+    };
+
+    tokio::spawn(run_udp(endpoint));
+
+    let receiver = UdpSocket::bind("127.0.0.1:11501").await.unwrap();
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let server_addr: SocketAddr = "127.0.0.1:11001".parse().unwrap();
+
+    sleep(Duration::from_millis(500)).await;
+
+    let payload = b"Ping Ping Ping";
+    let mut buf = [0u8; 2048];
+
+    // no reply yet: every datagram carries the header
+    let mut proxy_addr = None;
+    for _ in 0..3 {
+        client.send_to(payload, server_addr).await.unwrap();
+
+        let (n, from) = receiver.recv_from(&mut buf).await.unwrap();
+        assert_eq!(&buf[..12], SIGNATURE);
+        assert_eq!(&buf[28..n], payload);
+        proxy_addr = Some(from);
+    }
+
+    // reply once: header must be dropped afterwards
+    receiver.send_to(b"Pong Pong Pong", proxy_addr.unwrap()).await.unwrap();
+
+    let (n, from) = client.recv_from(&mut buf).await.unwrap();
+    assert_eq!(from, server_addr);
+    assert_eq!(&buf[..n], b"Pong Pong Pong");
+
+    client.send_to(payload, server_addr).await.unwrap();
+    let (n, _) = receiver.recv_from(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], payload);
 }

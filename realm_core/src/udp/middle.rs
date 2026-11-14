@@ -201,17 +201,8 @@ pub async fn associate_and_relay(
             }
 
             // existing association
-            if let Some((rsock, target, header_sent)) = sockmap.find(&laddr) {
-                send_packets(
-                    &rsock,
-                    pkts,
-                    target,
-                    conn_opts.as_ref(),
-                    laddr,
-                    local_addr,
-                    &header_sent,
-                )
-                .await?;
+            if let Some((rsock, target, replied)) = sockmap.find(&laddr) {
+                send_packets(&rsock, pkts, target, conn_opts.as_ref(), laddr, local_addr, &replied).await?;
                 continue;
             }
 
@@ -245,23 +236,14 @@ pub async fn associate_and_relay(
 
             // plain route
             let raddr = default_addr.unwrap();
-            let (rsock, _, header_sent) = sockmap.find_or_insert(&laddr, || {
+            let (rsock, _, replied) = sockmap.find_or_insert(&laddr, || {
                 let s = Arc::new(socket::associate(&raddr, &conn_opts)?);
                 tokio::spawn(send_back(lis, laddr, s.clone(), conn_opts, sockmap, None));
                 log::info!("[udp]new association {} => {} as {}", laddr, *rname, raddr);
                 Result::Ok((s, raddr))
             })?;
 
-            send_packets(
-                &rsock,
-                pkts,
-                raddr,
-                conn_opts.as_ref(),
-                laddr,
-                local_addr,
-                &header_sent,
-            )
-            .await?;
+            send_packets(&rsock, pkts, raddr, conn_opts.as_ref(), laddr, local_addr, &replied).await?;
         }
     }
 }
@@ -274,12 +256,12 @@ async fn send_packets(
     conn_opts: &ConnectOpts,
     laddr: SocketAddr,
     local_addr: SocketAddr,
-    header_sent: &AtomicBool,
+    replied: &AtomicBool,
 ) -> Result<()> {
     let target: SockAddrStore = target.into();
 
     #[cfg(feature = "proxy")]
-    if conn_opts.proxy_opts.send_proxy {
+    if conn_opts.proxy_opts.send_proxy && !replied.load(Ordering::Relaxed) {
         let dst = if local_addr.ip().is_unspecified() {
             laddr
         } else {
@@ -287,27 +269,12 @@ async fn send_packets(
         };
         let (h, n) = super::proxy::build_udp_v2_header(laddr, dst);
 
-        // Only the very first datagram of an association carries the PROXY
-        // header. The node learns the (transport -> real client) mapping from
-        // it, then maps every subsequent headerless datagram through lookup.
-        // This keeps large datagrams on the plain send path, avoiding both the
-        // per-packet header overhead and MTU/buffer truncation.
-        if !header_sent.swap(true, Ordering::Relaxed) {
-            if let Some((first, rest)) = pkts.split_first() {
-                batched::send_all_with_header(
-                    rsock,
-                    std::iter::once(first.ref_with_addr(&target)),
-                    &h[..n],
-                )
-                .await?;
-                if !rest.is_empty() {
-                    batched::send_all(rsock, rest.iter().map(|x| x.ref_with_addr(&target))).await?;
-                }
-                return Ok(());
-            }
-        }
-
-        return batched::send_all(rsock, pkts.iter().map(|x| x.ref_with_addr(&target))).await;
+        // Every datagram carries the PROXY header until the remote side replies.
+        // The node learns the (transport -> real client) mapping from it, then
+        // maps the following headerless datagrams through lookup. Keeping the
+        // header on the first few datagrams makes the mapping survive the loss
+        // of an individual datagram.
+        return batched::send_all_with_header(rsock, pkts.iter().map(|x| x.ref_with_addr(&target)), &h[..n]).await;
     }
 
     batched::send_all(rsock, pkts.iter().map(|x| x.ref_with_addr(&target))).await
@@ -532,7 +499,7 @@ async fn relay_pending(
         route.apply_conn_opts(&mut opts);
     }
 
-    let (rsock, target, header_sent) = open_association(
+    let (rsock, target, replied) = open_association(
         lis,
         laddr,
         &choice.raddr,
@@ -556,7 +523,7 @@ async fn relay_pending(
         flow.datagrams.len()
     );
 
-    send_buffered(&rsock, target, &flow.datagrams, &opts, laddr, local_addr, &header_sent).await
+    send_buffered(&rsock, target, &flow.datagrams, &opts, laddr, local_addr, &replied).await
 }
 
 #[cfg(feature = "quic-sni")]
@@ -577,7 +544,7 @@ async fn open_association(
         .ok_or_else(|| Error::new(ErrorKind::AddrNotAvailable, "could not resolve remote address"))?;
 
     let s = Arc::new(socket::associate(&addr, associate_opts)?);
-    let (activity, header_sent) = sockmap.insert(laddr, s.clone(), addr);
+    let (activity, replied) = sockmap.insert(laddr, s.clone(), addr);
     tokio::spawn(send_back(
         lis,
         laddr,
@@ -587,7 +554,7 @@ async fn open_association(
         Some(activity),
     ));
 
-    Ok((s, addr, header_sent))
+    Ok((s, addr, replied))
 }
 
 #[cfg(feature = "quic-sni")]
@@ -599,10 +566,10 @@ async fn send_buffered(
     conn_opts: &ConnectOpts,
     laddr: SocketAddr,
     local_addr: SocketAddr,
-    header_sent: &AtomicBool,
+    replied: &AtomicBool,
 ) -> Result<()> {
     #[cfg(feature = "proxy")]
-    let header = if conn_opts.proxy_opts.send_proxy && !header_sent.swap(true, Ordering::Relaxed) {
+    let header = if conn_opts.proxy_opts.send_proxy && !replied.load(Ordering::Relaxed) {
         let dst = if local_addr.ip().is_unspecified() {
             laddr
         } else {
@@ -614,17 +581,15 @@ async fn send_buffered(
         None
     };
 
-    for (i, datagram) in datagrams.iter().enumerate() {
+    for datagram in datagrams.iter() {
         #[cfg(feature = "proxy")]
         if let Some(header) = &header {
-            // Only the first buffered datagram carries the header.
-            if i == 0 {
-                let mut buf = Vec::with_capacity(header.len() + datagram.len());
-                buf.extend_from_slice(header);
-                buf.extend_from_slice(datagram);
-                rsock.send_to(&buf, target).await?;
-                continue;
-            }
+            // Every buffered datagram carries the header until the remote replies.
+            let mut buf = Vec::with_capacity(header.len() + datagram.len());
+            buf.extend_from_slice(header);
+            buf.extend_from_slice(datagram);
+            rsock.send_to(&buf, target).await?;
+            continue;
         }
 
         rsock.send_to(datagram, target).await?;
@@ -702,6 +667,9 @@ async fn send_back(
         }
 
         log::debug!("[udp]rear batched recvfrom[{}]", registry.count());
+
+        // the remote side replied, stop prepending the PROXY header
+        sockmap.mark_replied(&laddr);
 
         let pkts = registry.iter().map(|pkt| pkt.ref_with_addr(&laddr_s));
         if let Err(e) = batched::send_all(&lsock, pkts).await {

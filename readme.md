@@ -104,6 +104,9 @@ cargo build --release \
     --features 'transport, transport-tls-ring'
 # equals
 cargo build --release --no-default-features --features default-ring
+
+# override the displayed version (release builds use this)
+REALM_VERSION=v2.9.7 cargo build --release --no-default-features --features default-slim
 ```
 
 ### Cross Compile
@@ -667,7 +670,7 @@ default: false
 
 Require `proxy` feature.
 
-Send haproxy PROXY protocol v2 header. For TCP it is sent once after the connection is established; for UDP it is prepended to every datagram.
+Send haproxy PROXY protocol v2 header. For TCP it is sent once after the connection is established; for UDP it is prepended to every datagram until the remote side replies at least once, then datagrams are sent headerless.
 
 You should make sure the remote peer also speaks proxy-protocol.
 
