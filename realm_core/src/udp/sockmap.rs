@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::collections::HashMap;
 
@@ -17,6 +17,7 @@ struct Assoc {
     socket: Arc<UdpSocket>,
     raddr: SocketAddr,
     activity: Arc<AtomicU64>,
+    header_sent: Arc<AtomicBool>,
 }
 
 pub struct SockMap(RwLock<HashMap<SocketAddr, Assoc>>);
@@ -27,22 +28,30 @@ impl SockMap {
     }
 
     #[inline]
-    pub fn find(&self, addr: &SocketAddr) -> Option<(Arc<UdpSocket>, SocketAddr)> {
+    pub fn find(&self, addr: &SocketAddr) -> Option<(Arc<UdpSocket>, SocketAddr, Arc<AtomicBool>)> {
         // fetch the lock
 
         let sockmap = self.0.read().unwrap();
 
-        sockmap.get(addr).map(|x| (x.socket.clone(), x.raddr))
+        sockmap
+            .get(addr)
+            .map(|x| (x.socket.clone(), x.raddr, x.header_sent.clone()))
 
         // drop the lock
     }
 
     #[inline]
-    pub fn insert(&self, addr: SocketAddr, socket: Arc<UdpSocket>, raddr: SocketAddr) -> Arc<AtomicU64> {
+    pub fn insert(
+        &self,
+        addr: SocketAddr,
+        socket: Arc<UdpSocket>,
+        raddr: SocketAddr,
+    ) -> (Arc<AtomicU64>, Arc<AtomicBool>) {
         // fetch the lock
         let mut sockmap = self.0.write().unwrap();
 
         let activity = Arc::new(AtomicU64::new(now_millis()));
+        let header_sent = Arc::new(AtomicBool::new(false));
 
         let _ = sockmap.insert(
             addr,
@@ -50,15 +59,20 @@ impl SockMap {
                 socket,
                 raddr,
                 activity: activity.clone(),
+                header_sent: header_sent.clone(),
             },
         );
 
         // drop the lock
-        activity
+        (activity, header_sent)
     }
 
     #[inline]
-    pub fn find_or_insert<E, F>(&self, addr: &SocketAddr, f: F) -> Result<(Arc<UdpSocket>, SocketAddr), E>
+    pub fn find_or_insert<E, F>(
+        &self,
+        addr: &SocketAddr,
+        f: F,
+    ) -> Result<(Arc<UdpSocket>, SocketAddr, Arc<AtomicBool>), E>
     where
         F: FnOnce() -> Result<(Arc<UdpSocket>, SocketAddr), E>,
     {
@@ -66,8 +80,8 @@ impl SockMap {
             Some(x) => Ok(x),
             None => {
                 let (socket, raddr) = f()?;
-                self.insert(*addr, socket.clone(), raddr);
-                Ok((socket, raddr))
+                let (_, header_sent) = self.insert(*addr, socket.clone(), raddr);
+                Ok((socket, raddr, header_sent))
             }
         }
     }
